@@ -1,5 +1,5 @@
 # Farm Media Daemon — config template
-# Copy to /opt/truesight_autopilot/farm_media_daemon_config.yaml (never commit real creds)
+# Copy to /opt/truesight_autopilot/media_archive_daemon_config.yaml (never commit real creds)
 
 # Global daily upload budget across ALL farms (YouTube API "Video Uploads per day")
 # Unverified OAuth project: ~6/day. Verified: up to 100/day. Reset ~07:00 UTC.

@@ -6,7 +6,7 @@ Wants=network-online.target
 [Service]
 Type=simple
 User=ubuntu
-ExecStart=/opt/truesight_autopilot/.venv/bin/python /opt/truesight_autopilot/farm_media_daemon/farm_media_daemon.py --config /opt/truesight_autopilot/farm_media_daemon_config.yaml
+ExecStart=/opt/truesight_autopilot/.venv/bin/python /opt/truesight_autopilot/farm_media_daemon/farm_media_daemon.py --config /opt/truesight_autopilot/media_archive_daemon_config.yaml
 Restart=always
 RestartSec=30
 
