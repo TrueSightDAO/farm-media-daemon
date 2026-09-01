@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""farm-media-manifest - aggregate sidecars into FARM_MEDIA_MANIFESTS/<farm>.json.
+"""farm-media-manifest - aggregate sidecars into farm_media_manifests/<farm>.json (repo TrueSightDAO/farm_media_manifests).
 
 The commit step stays deliberate: a Sophia (or the governor) runs this, reviews,
 then pushes via the normal PR flow. The daemon itself never touches GitHub.
