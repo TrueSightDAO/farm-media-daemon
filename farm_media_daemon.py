@@ -215,7 +215,7 @@ def main() -> int:
     ap = argparse.ArgumentParser(description="Farm Media Daemon")
     ap.add_argument(
         "--config",
-        default="/opt/truesight_autopilot/farm_media_daemon_config.yaml",
+        default="/opt/truesight_autopilot/media_archive_daemon_config.yaml",
     )
     ap.add_argument(
         "--upload-script",
