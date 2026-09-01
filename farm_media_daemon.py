@@ -19,7 +19,6 @@ import logging
 import os
 import subprocess
 import time
-from pathlib import Path
 
 import yaml
 
@@ -28,8 +27,8 @@ LOG = logging.getLogger("farm_media_daemon")
 UPLOAD_TIMEOUT_S = 600
 BACKOFF_ERROR_S = 60
 QUOTA_RESET = dt.time(hour=7, minute=5)  # UTC, YouTube daily quota reset
-QUOTA_BACKOFF_START_S = 15 * 60     # first pause on 429
-QUOTA_BACKOFF_MAX_S = 2 * 60 * 60   # cap the 429 backoff at 2h
+QUOTA_BACKOFF_START_S = 15 * 60  # first pause on 429
+QUOTA_BACKOFF_MAX_S = 2 * 60 * 60  # cap the 429 backoff at 2h
 QUOTA_SLEEP_FALLBACK_S = 6 * 60 * 60  # after this much 429 backoff, sleep to reset
 
 
@@ -78,7 +77,9 @@ def sleep_until_quota_reset() -> None:
     time.sleep(min(wait, 3600.0))
 
 
-def upload_one(upload_cmd: list[str], mp4: str, sidecar: dict) -> tuple[str | None, str]:
+def upload_one(
+    upload_cmd: list[str], mp4: str, sidecar: dict
+) -> tuple[str | None, str]:
     """Return (video_id, output_tail). video_id None on failure."""
     desc = sidecar.get("description") or ""
     cmd = upload_cmd + [mp4, "--title", sidecar["title"], "--description", desc]
@@ -113,6 +114,33 @@ def log_attempt(
         )
 
 
+def iter_sidecars(inbox_path: str):
+    """Yield (mp4_path, sidecar_path, sidecar_dict) for videos without yt_id."""
+    if not os.path.isdir(inbox_path):
+        return
+    for mp4 in sorted(os.listdir(inbox_path)):
+        if not mp4.lower().endswith((".mp4", ".mov", ".m4v")):
+            continue
+        sc = os.path.join(inbox_path, mp4 + ".json")
+        if not os.path.exists(sc):
+            LOG.warning("missing sidecar for %s", mp4)
+            continue
+        with open(sc, encoding="utf-8") as fh:
+            sidecar = json.load(fh)
+        yield os.path.join(inbox_path, mp4), sc, sidecar
+
+
+def missing_fields(sidecar: dict) -> list[str]:
+    """Return required fields missing from a sidecar."""
+    required = ["title", "description", "farm_id", "file"]
+    return [f for f in required if not sidecar.get(f)]
+
+
+def load_config(path: str) -> dict:
+    with open(path, encoding="utf-8") as fh:
+        return yaml.safe_load(fh) or {}
+
+
 def run(cfg: dict, upload_cmd: list[str], logpath: str, once: bool = False) -> None:
     budget = int(cfg.get("daily_budget", 6))
     inboxes = cfg.get("inboxes", [])
@@ -128,9 +156,7 @@ def run(cfg: dict, upload_cmd: list[str], logpath: str, once: bool = False) -> N
                     continue
                 missing = missing_fields(sidecar)
                 if missing:
-                    sidecar["error"] = (
-                        f"needs_metadata: missing {','.join(missing)}"
-                    )
+                    sidecar["error"] = f"needs_metadata: missing {','.join(missing)}"
                     write_sidecar(sc, sidecar)
                     LOG.warning("%s: %s", farm_id, sidecar["error"])
                     continue
@@ -144,9 +170,7 @@ def run(cfg: dict, upload_cmd: list[str], logpath: str, once: bool = False) -> N
                 processed += 1
                 sidecar.setdefault("farm_id", farm_id)
                 vid, tail = upload_one(upload_cmd, mp4, sidecar)
-                log_attempt(
-                    logpath, farm_id, sidecar["file"], vid, 0 if vid else None
-                )
+                log_attempt(logpath, farm_id, sidecar["file"], vid, 0 if vid else None)
                 if vid:
                     sidecar["yt_id"] = vid
                     sidecar["error"] = None
@@ -159,14 +183,14 @@ def run(cfg: dict, upload_cmd: list[str], logpath: str, once: bool = False) -> N
                     if "quota" in low or "429" in low or "ratelimitexceeded" in low:
                         LOG.warning(
                             "%s quota exhausted; pause %.0fs then retry: %s",
-                            sidecar["file"], quota_backoff_s, tail[-120:],
+                            sidecar["file"],
+                            quota_backoff_s,
+                            tail[-120:],
                         )
                         if once:
                             return
                         time.sleep(quota_backoff_s)
-                        quota_backoff_s = min(
-                            quota_backoff_s * 2, QUOTA_BACKOFF_MAX_S
-                        )
+                        quota_backoff_s = min(quota_backoff_s * 2, QUOTA_BACKOFF_MAX_S)
                         if quota_backoff_s >= QUOTA_SLEEP_FALLBACK_S:
                             LOG.warning(
                                 "429 persisting past %.0fs; sleeping to reset",
