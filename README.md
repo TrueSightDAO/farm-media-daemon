@@ -14,7 +14,7 @@ Shared upload daemon for TrueSightDAO farm media. Videos + metadata (sidecars) l
 - Quota: global `daily_budget` (default 6/day), round-robin fairness, 429 backoff. Resume-safe by construction (sidecar is the state).
 
 ## How manifests commit
-- `farm-media-manifest commit <farm_id>` aggregates sidecars → `FARM_MEDIA_MANIFESTS/<farm>.json` + opens a PR.
+- `farm-media-manifest commit <farm_id>` aggregates sidecars → `farm_media_manifests/<farm>.json` + opens a PR (repo TrueSightDAO/farm_media_manifests).
 - Any Sophia can do this; the daemon never commits.
 
 ## CLI
