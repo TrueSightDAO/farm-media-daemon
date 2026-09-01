@@ -1,0 +1,30 @@
+# Farm Media Daemon — config template
+# Copy to /opt/truesight_autopilot/farm_media_daemon_config.yaml (never commit real creds)
+
+# Global daily upload budget across ALL farms (YouTube API "Video Uploads per day")
+# Unverified OAuth project: ~6/day. Verified: up to 100/day. Reset ~07:00 UTC.
+daily_budget: 6
+
+# YouTube project(s) — add more entries to scale cap (multi-project support planned)
+projects:
+  - name: truesight-main
+    credentials: /opt/truesight_autopilot/config/youtube/youtube_token.json
+    client_secrets: /opt/truesight_autopilot/config/youtube/client_secret.json
+
+# Inboxes the daemon watches
+inboxes:
+  - farm_id: cleide
+    path: /home/ubuntu/farm_media_inbox/cleide
+    priority: 2
+  - farm_id: paulo-la-do-sitio
+    path: /home/ubuntu/farm_media_inbox/paulo-la-do-sitio
+    priority: 1
+
+# Sleep window: uploads pause 07:00-07:05 UTC for quota reset (configurable)
+quota_reset_utc: "07:05"
+
+# Upload defaults (per-sidecar override wins)
+defaults:
+  privacy: public
+  tags: [cacao, agroverse]
+  description_footer: "Cacao farm visit, CEPOTX, Para, Brazil."

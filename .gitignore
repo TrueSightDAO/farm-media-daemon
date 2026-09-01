@@ -1,0 +1,14 @@
+# credentials — never commit
+config/youtube/*.json
+*.token
+*.cred
+.env
+
+# local state
+*.log
+manifest.json
+farm_media_inbox/
+*.mp4
+*.MOV
+*.HEIC
+*.jpg
