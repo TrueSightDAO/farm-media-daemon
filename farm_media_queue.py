@@ -9,7 +9,7 @@ import sys
 
 def main() -> int:
     ap = argparse.ArgumentParser(description="List farm-media queue status")
-    ap.add_argument("--inbox", default="/home/ubuntu/farm_media_inbox")
+    ap.add_argument("--inbox", default="/home/ubuntu/media_archive_inbox/farm-media")
     ap.add_argument("--farm", default=None)
     ap.add_argument("--with-yt", action="store_true", help="only items with yt_id")
     args = ap.parse_args()
