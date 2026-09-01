@@ -96,14 +96,31 @@ def write_sidecar(path: str, sidecar: dict) -> None:
     os.replace(tmp, path)  # atomic
 
 
-def attempts_today(logpath: str) -> int:
+def successes_since_reset(logpath: str, reset: dt.time) -> int:
+    """Count SUCCESSFUL uploads since the last quota-reset boundary.
+
+    YouTube's "Video Uploads per day" quota resets at `reset` UTC (not
+    midnight), so a calendar-day count is wrong between 00:00 and the reset.
+    Only successful inserts consume quota; 429-rejected attempts do not.
+    """
     if not os.path.exists(logpath):
         return 0
-    today = dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%d")
+    now = dt.datetime.now(dt.timezone.utc)
+    boundary = now.replace(
+        hour=reset.hour, minute=reset.minute, second=0, microsecond=0
+    )
+    if boundary > now:
+        boundary -= dt.timedelta(days=1)
     n = 0
     with open(logpath, encoding="utf-8") as fh:
         for line in fh:
-            if line.startswith(today):
+            try:
+                lt = dt.datetime.strptime(line[:19], "%Y-%m-%d %H:%M:%S").replace(
+                    tzinfo=dt.timezone.utc
+                )
+            except ValueError:
+                continue
+            if lt >= boundary and "FAILED" not in line:
                 n += 1
     return n
 
@@ -132,7 +149,7 @@ def upload_one(upload_cmd: list[str], mp4: str, sidecar: dict) -> tuple[str | No
             cmd, capture_output=True, text=True, timeout=UPLOAD_TIMEOUT_S
         )
         out = (proc.stdout or "") + (proc.stderr or "")
-        tail = out[-300:]
+        tail = out[-2000:]  # keep enough to see past google-api FutureWarnings
         for line in out.splitlines():
             if "Video ID:" in line:
                 vid = line.split("Video ID:", 1)[-1].strip()
@@ -157,19 +174,26 @@ def run(cfg: dict, upload_cmd: list[str], logpath: str, once: bool = False) -> N
     budget = int(cfg.get("daily_budget", 6))
     inboxes = cfg.get("inboxes", [])
     while True:
-        used = attempts_today(logpath)
+        used = successes_since_reset(logpath, QUOTA_RESET)
         if used >= budget:
+            if once:
+                LOG.info(
+                    "daily budget already spent (%d/%d); --once exiting",
+                    used,
+                    budget,
+                )
+                return
             sleep_until_quota_reset()
             continue
         made_progress = False
         for inbox in inboxes:
-            if attempts_today(logpath) >= budget:
+            if successes_since_reset(logpath, QUOTA_RESET) >= budget:
                 break
             farm_id = inbox.get("farm_id")
             limit = int(inbox.get("priority", 1))
             processed = 0
             for mp4, sc, sidecar in iter_sidecars(inbox.get("path", "")):
-                if attempts_today(logpath) >= budget:
+                if successes_since_reset(logpath, QUOTA_RESET) >= budget:
                     break
                 if sidecar.get("yt_id"):
                     continue
@@ -197,9 +221,13 @@ def run(cfg: dict, upload_cmd: list[str], logpath: str, once: bool = False) -> N
                     made_progress = True
                 else:
                     low = tail.lower()
-                    if "quota" in low or "429" in low:
-                        LOG.warning("%s quota hit: %s", sidecar["file"], tail[-120:])
-                        time.sleep(BACKOFF_QUOTA_S)
+                    if "quota" in low or "429" in low or "ratelimitexceeded" in low:
+                        LOG.warning(
+                            "%s quota exhausted: %s", sidecar["file"], tail[-120:]
+                        )
+                        if once:
+                            return
+                        sleep_until_quota_reset()
                     else:
                         sidecar["error"] = tail[-200:]
                         write_sidecar(sc, sidecar)
@@ -247,8 +275,7 @@ def main() -> int:
     try:
         run(cfg, upload_cmd, logpath, once=args.once)
     finally:
-        if not args.once:
-            release_lock()
+        release_lock()
     return 0
 
 
