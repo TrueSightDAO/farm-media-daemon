@@ -9,7 +9,7 @@ Every farm's media (photos + videos) needs to reach YouTube and the shared manif
 ## 2. Principles (governor-approved)
 
 1. **Metadata travels with the file.** A `<file>.json` sidecar sits next to each video carrying everything the upstream pipeline already computed (sha256, GPS, objects, duration, title, description, farm_id, provenance). The daemon never regenerates, looks up, or infers.
-2. **The queue IS the inbox.** `farm_media_inbox/<farm_id>/` — pending = no `yt_id`, done = `yt_id` present, failed = `error` field.
+2. **The queue IS the inbox.** `media_archive_inbox/<source>/<farm_id>/` — pending = no `yt_id`, done = `yt_id` present, failed = `error` field. Source namespaces match MAP terminology (farm-media = first, event-media future).
 3. **The daemon never touches GitHub.** It only reads sidecars, uploads, writes `yt_id` back into the sidecar, and moves on.
 4. **GitHub is the committed state.** `FARM_MEDIA_MANIFESTS/<farm>.json` + `index.json` in agentic_ai_context are the durable record any Sophia reads. Committing is a deliberate step (Sophia or `manifest-commit` CLI) — never automatic per-video.
 5. **Any Sophia can read/commit.** The manifests are the index; querying is just reading them. Midstream handoff between Sophias works from any thread.
@@ -19,7 +19,7 @@ Every farm's media (photos + videos) needs to reach YouTube and the shared manif
 ## 3. Layout
 
 ```
-farm_media_inbox/<farm_id>/
+media_archive_inbox/<source>/<farm_id>/
   IMG_4859.mp4
   IMG_4859.mp4.json        # sidecar
 ```

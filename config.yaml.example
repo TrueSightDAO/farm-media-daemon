@@ -14,10 +14,10 @@ projects:
 # Inboxes the daemon watches
 inboxes:
   - farm_id: cleide
-    path: /home/ubuntu/farm_media_inbox/cleide
+    path: /home/ubuntu/media_archive_inbox/farm-media/cleide
     priority: 2
   - farm_id: paulo-la-do-sitio
-    path: /home/ubuntu/farm_media_inbox/paulo-la-do-sitio
+    path: /home/ubuntu/media_archive_inbox/farm-media/paulo-la-do-sitio
     priority: 1
 
 # Sleep window: uploads pause 07:00-07:05 UTC for quota reset (configurable)
