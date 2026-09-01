@@ -6,7 +6,7 @@ Shared upload daemon for TrueSightDAO farm media. Videos + metadata (sidecars) l
 
 ## How farms register
 1. Process media per-farm (transcode MOV→MP4, GPS re-inject, optional YOLO detect) — stays outside this repo.
-2. Drop `<file>.mp4` + `<file>.mp4.json` (sidecar, see DESIGN.md schema) into `farm_media_inbox/<farm_id>/`.
+2. Drop `<file>.mp4` + `<file>.mp4.json` (sidecar, see DESIGN.md schema) into `media_archive_inbox/farm-media/<farm_id>/`.
 3. Add the farm to `config.yaml` (`inboxes:`).
 
 ## How videos land & upload
