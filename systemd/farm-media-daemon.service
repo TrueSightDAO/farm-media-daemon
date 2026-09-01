@@ -1,0 +1,14 @@
+[Unit]
+Description=Farm Media Daemon - shared YouTube uploader
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+ExecStart=/opt/truesight_autopilot/.venv/bin/python /opt/truesight_autopilot/farm_media_daemon/farm_media_daemon.py --config /opt/truesight_autopilot/farm_media_daemon_config.yaml
+Restart=always
+RestartSec=30
+
+[Install]
+WantedBy=multi-user.target
