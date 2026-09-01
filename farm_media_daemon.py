@@ -1,18 +1,16 @@
 #!/usr/bin/env python3
-"""Farm Media Daemon - shared YouTube uploader for TrueSightDAO farm media.
+"""Farm Media Daemon — shared YouTube uploader for the Media Archives Pipeline (MAP).
 
-Governor-approved design: see DESIGN.md in this repo; plan in
-agentic_ai_context/plans/FARM_MEDIA_DAEMON_PLAN.md.
+Watches inboxes under the media archive, uploads videos whose sidecars lack a
+`yt_id`, and writes the YouTube ID back into the sidecar (atomic). The daemon
+never touches GitHub; committing manifests is a separate deliberate step.
 
-Responsibilities (and only these):
-  1. Watch farm inboxes for mp4+sidecar pairs.
-  2. Upload sidecar-complete videos to YouTube.
-  3. Write yt_id back into the sidecar; log every attempt.
-  4. Respect a global daily budget; back off on quota (429).
-  5. NEVER touch GitHub.
+Quota model: the configured daily_budget is a SOFT ceiling (set high — 429 is
+the real signal). On 429/quota-exhausted the daemon pauses with escalating
+backoff and retries, because YouTube's limit resets on a rolling window rather
+than strictly every 24h. Only after the backoff exceeds 6h does it fall back to
+sleeping until the 07:05 UTC reset boundary.
 """
-
-from __future__ import annotations
 
 import argparse
 import datetime as dt
@@ -20,73 +18,18 @@ import json
 import logging
 import os
 import subprocess
-import sys
 import time
+
+import yaml
 
 LOG = logging.getLogger("farm_media_daemon")
 
-QUOTA_RESET = dt.time(hour=7, minute=5)  # UTC, YouTube daily quota reset
-BACKOFF_QUOTA_S = 600
+UPLOAD_TIMEOUT_S = 600
 BACKOFF_ERROR_S = 60
-UPLOAD_TIMEOUT_S = 900
-LOCKFILE = "/tmp/farm_media_daemon.pid"
-
-
-def load_config(path: str) -> dict:
-    if not os.path.exists(path):
-        raise SystemExit(f"config not found: {path}")
-    with open(path, encoding="utf-8") as fh:
-        try:
-            import yaml  # type: ignore[import-not-found]
-        except ImportError:
-            return json.load(fh)
-        return yaml.safe_load(fh) or {}
-
-
-def acquire_lock() -> None:
-    if os.path.exists(LOCKFILE):
-        try:
-            with open(LOCKFILE, encoding="utf-8") as fh:
-                pid = int(fh.read().strip())
-            os.kill(pid, 0)  # raises if dead
-            raise SystemExit(f"another daemon is running (pid {pid}); refusing to start")
-        except (ValueError, ProcessLookupError):
-            LOG.warning("stale lockfile %s ignored", LOCKFILE)
-    with open(LOCKFILE, "w", encoding="utf-8") as fh:
-        fh.write(str(os.getpid()))
-
-
-def release_lock() -> None:
-    try:
-        os.unlink(LOCKFILE)
-    except FileNotFoundError:
-        pass
-
-
-def iter_sidecars(inbox_path: str):
-    """Yield (mp4_path, sidecar_path, sidecar) for complete pairs."""
-    if not os.path.isdir(inbox_path):
-        return
-    for name in sorted(os.listdir(inbox_path)):
-        if not name.endswith(".mp4"):
-            continue
-        mp4 = os.path.join(inbox_path, name)
-        sc = mp4 + ".json"
-        if not os.path.exists(sc):
-            LOG.warning("%s has no sidecar; skipping", mp4)
-            continue
-        try:
-            with open(sc, encoding="utf-8") as fh:
-                sidecar = json.load(fh)
-        except json.JSONDecodeError:
-            LOG.error("%s unparseable sidecar; skipping", sc)
-            continue
-        yield mp4, sc, sidecar
-
-
-def missing_fields(sidecar: dict) -> list[str]:
-    required = ("file", "farm_id", "title")
-    return [k for k in required if not sidecar.get(k)]
+QUOTA_RESET = dt.time(hour=7, minute=5)  # UTC, YouTube daily quota reset
+QUOTA_BACKOFF_START_S = 15 * 60  # first pause on 429
+QUOTA_BACKOFF_MAX_S = 2 * 60 * 60  # cap the 429 backoff at 2h
+QUOTA_SLEEP_FALLBACK_S = 6 * 60 * 60  # after this much 429 backoff, sleep to reset
 
 
 def write_sidecar(path: str, sidecar: dict) -> None:
@@ -99,9 +42,8 @@ def write_sidecar(path: str, sidecar: dict) -> None:
 def successes_since_reset(logpath: str, reset: dt.time) -> int:
     """Count SUCCESSFUL uploads since the last quota-reset boundary.
 
-    YouTube's "Video Uploads per day" quota resets at `reset` UTC (not
-    midnight), so a calendar-day count is wrong between 00:00 and the reset.
-    Only successful inserts consume quota; 429-rejected attempts do not.
+    Used to report pace and to apply the soft budget ceiling. Only successful
+    inserts consume quota; 429-rejected attempts do not.
     """
     if not os.path.exists(logpath):
         return 0
@@ -135,7 +77,9 @@ def sleep_until_quota_reset() -> None:
     time.sleep(min(wait, 3600.0))
 
 
-def upload_one(upload_cmd: list[str], mp4: str, sidecar: dict) -> tuple[str | None, str]:
+def upload_one(
+    upload_cmd: list[str], mp4: str, sidecar: dict
+) -> tuple[str | None, str]:
     """Return (video_id, output_tail). video_id None on failure."""
     desc = sidecar.get("description") or ""
     cmd = upload_cmd + [mp4, "--title", sidecar["title"], "--description", desc]
@@ -170,64 +114,90 @@ def log_attempt(
         )
 
 
+def iter_sidecars(inbox_path: str):
+    """Yield (mp4_path, sidecar_path, sidecar_dict) for videos without yt_id."""
+    if not os.path.isdir(inbox_path):
+        return
+    for mp4 in sorted(os.listdir(inbox_path)):
+        if not mp4.lower().endswith((".mp4", ".mov", ".m4v")):
+            continue
+        sc = os.path.join(inbox_path, mp4 + ".json")
+        if not os.path.exists(sc):
+            LOG.warning("missing sidecar for %s", mp4)
+            continue
+        with open(sc, encoding="utf-8") as fh:
+            sidecar = json.load(fh)
+        yield os.path.join(inbox_path, mp4), sc, sidecar
+
+
+def missing_fields(sidecar: dict) -> list[str]:
+    """Return required fields missing from a sidecar."""
+    required = ["title", "description", "farm_id", "file"]
+    return [f for f in required if not sidecar.get(f)]
+
+
+def load_config(path: str) -> dict:
+    with open(path, encoding="utf-8") as fh:
+        return yaml.safe_load(fh) or {}
+
+
 def run(cfg: dict, upload_cmd: list[str], logpath: str, once: bool = False) -> None:
     budget = int(cfg.get("daily_budget", 6))
     inboxes = cfg.get("inboxes", [])
+    quota_backoff_s = QUOTA_BACKOFF_START_S
     while True:
-        used = successes_since_reset(logpath, QUOTA_RESET)
-        if used >= budget:
-            if once:
-                LOG.info(
-                    "daily budget already spent (%d/%d); --once exiting",
-                    used,
-                    budget,
-                )
-                return
-            sleep_until_quota_reset()
-            continue
         made_progress = False
         for inbox in inboxes:
-            if successes_since_reset(logpath, QUOTA_RESET) >= budget:
-                break
             farm_id = inbox.get("farm_id")
             limit = int(inbox.get("priority", 1))
             processed = 0
             for mp4, sc, sidecar in iter_sidecars(inbox.get("path", "")):
-                if successes_since_reset(logpath, QUOTA_RESET) >= budget:
-                    break
                 if sidecar.get("yt_id"):
                     continue
                 missing = missing_fields(sidecar)
                 if missing:
-                    sidecar["error"] = (
-                        f"needs_metadata: missing {','.join(missing)}"
-                    )
+                    sidecar["error"] = f"needs_metadata: missing {','.join(missing)}"
                     write_sidecar(sc, sidecar)
                     LOG.warning("%s: %s", farm_id, sidecar["error"])
                     continue
                 if processed >= limit:
                     break
+                # soft ceiling: don't exceed the budget within one reset window
+                if successes_since_reset(logpath, QUOTA_RESET) >= budget:
+                    LOG.info("budget %d reached; pausing", budget)
+                    time.sleep(60)
+                    break
                 processed += 1
                 sidecar.setdefault("farm_id", farm_id)
                 vid, tail = upload_one(upload_cmd, mp4, sidecar)
-                log_attempt(
-                    logpath, farm_id, sidecar["file"], vid, 0 if vid else None
-                )
+                log_attempt(logpath, farm_id, sidecar["file"], vid, 0 if vid else None)
                 if vid:
                     sidecar["yt_id"] = vid
                     sidecar["error"] = None
                     write_sidecar(sc, sidecar)
                     LOG.info("%s %s -> %s", farm_id, sidecar["file"], vid)
                     made_progress = True
+                    quota_backoff_s = QUOTA_BACKOFF_START_S  # reset on success
                 else:
                     low = tail.lower()
                     if "quota" in low or "429" in low or "ratelimitexceeded" in low:
                         LOG.warning(
-                            "%s quota exhausted: %s", sidecar["file"], tail[-120:]
+                            "%s quota exhausted; pause %.0fs then retry: %s",
+                            sidecar["file"],
+                            quota_backoff_s,
+                            tail[-120:],
                         )
                         if once:
                             return
-                        sleep_until_quota_reset()
+                        time.sleep(quota_backoff_s)
+                        quota_backoff_s = min(quota_backoff_s * 2, QUOTA_BACKOFF_MAX_S)
+                        if quota_backoff_s >= QUOTA_SLEEP_FALLBACK_S:
+                            LOG.warning(
+                                "429 persisting past %.0fs; sleeping to reset",
+                                quota_backoff_s,
+                            )
+                            sleep_until_quota_reset()
+                            quota_backoff_s = QUOTA_BACKOFF_START_S
                     else:
                         sidecar["error"] = tail[-200:]
                         write_sidecar(sc, sidecar)
@@ -259,25 +229,17 @@ def main() -> int:
     logging.basicConfig(
         level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s"
     )
-    if args.log_file:
-        fh = logging.FileHandler(args.log_file)
-        fh.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
-        LOG.addHandler(fh)
-
     cfg = load_config(args.config)
-    upload_cmd = [args.venv_python, args.upload_script]
-    logpath = os.path.join(
-        os.path.dirname(os.path.abspath(args.log_file)), "farm_media_uploads.log"
-    )
-
-    if not args.once:
-        acquire_lock()
+    upload_cmd = [
+        args.venv_python,
+        args.upload_script,
+    ]
     try:
-        run(cfg, upload_cmd, logpath, once=args.once)
-    finally:
-        release_lock()
+        run(cfg, upload_cmd, args.log_file, once=args.once)
+    except KeyboardInterrupt:
+        LOG.info("interrupt; exiting")
     return 0
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    raise SystemExit(main())
