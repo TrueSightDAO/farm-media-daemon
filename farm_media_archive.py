@@ -26,8 +26,11 @@ import hashlib
 import json
 import logging
 import os
+import shutil
 import subprocess
+import tempfile
 import time
+import zipfile
 
 import yaml
 
@@ -155,8 +158,17 @@ def iter_raws(root: str, extensions: tuple) -> list:
     return out
 
 
-def archive_one(s3, bucket: str, farm_id: str, src: str, marker: str, preview_frame_frac: float) -> dict:
-    basename = os.path.basename(src)
+def archive_one(
+    s3,
+    bucket: str,
+    farm_id: str,
+    src: str,
+    marker: str | None,
+    preview_frame_frac: float,
+    preview_dir: str | None = None,
+    as_name: str | None = None,
+) -> dict:
+    basename = as_name or os.path.basename(src)
     stem, _ext = os.path.splitext(basename)
     raw_key = f"raw/{farm_id}/{basename}"
     prev_key = f"previews/{farm_id}/{stem}.jpg"
@@ -165,7 +177,9 @@ def archive_one(s3, bucket: str, farm_id: str, src: str, marker: str, preview_fr
     captured = read_capture_time(src)
     dur = probe_duration_s(src)
     at_s = (dur * preview_frame_frac) if dur else 1.0
-    prev_local = os.path.join(os.path.dirname(src), stem + ".preview.jpg")
+    prev_local = os.path.join(
+        preview_dir or os.path.dirname(src), stem + ".preview.jpg"
+    )
     ok = make_preview(src, prev_local, at_s)
     # raw upload (boto3 multipart auto for >8MB)
     s3.upload_file(src, bucket, raw_key)
@@ -185,8 +199,102 @@ def archive_one(s3, bucket: str, farm_id: str, src: str, marker: str, preview_fr
         "produced_by": "farm-media-archive",
         "uploaded_at": dt.datetime.now(dt.timezone.utc).isoformat(),
     }
-    write_sidecar(marker, sidecar)
+    if marker:
+        write_sidecar(marker, sidecar)
     return sidecar
+
+
+def _is_junk_entry(name: str) -> bool:
+    """True for __MACOSX/ and ._ AppleDouble entries — never archived."""
+    return any(
+        p.startswith("__MACOSX") or p.startswith("._") for p in name.split("/") if p
+    )
+
+
+def iter_zip_entries(zip_path: str, extensions: tuple, archived: set) -> list:
+    """Media entry names inside a zip not yet archived (junk skipped)."""
+    try:
+        with zipfile.ZipFile(zip_path) as zf:
+            infos = zf.infolist()
+    except zipfile.BadZipFile:
+        LOG.error("bad zip: %s", zip_path)
+        return []
+    out = []
+    for info in infos:
+        bn = os.path.basename(info.filename)
+        if _is_junk_entry(info.filename) or not bn.lower().endswith(extensions):
+            continue
+        if bn in archived:
+            continue
+        out.append(info.filename)
+    return out
+
+
+def extract_zip_entry(zip_path: str, entry: str, tmpdir: str | None = None) -> str:
+    """Stream ONE zip entry to a temp file — never extract the whole zip."""
+    suffix = os.path.splitext(os.path.basename(entry))[1]
+    fd, tmp = tempfile.mkstemp(suffix=suffix, prefix="zarc_", dir=tmpdir)
+    os.close(fd)
+    with zipfile.ZipFile(zip_path) as zf, zf.open(entry) as src, open(tmp, "wb") as dst:
+        shutil.copyfileobj(src, dst, 1024 * 1024)
+    return tmp
+
+
+def load_zip_state(zip_path: str) -> tuple:
+    st_path = zip_path + ".archive.json"
+    if os.path.exists(st_path):
+        try:
+            with open(st_path, encoding="utf-8") as fh:
+                return json.load(fh), st_path
+        except (OSError, ValueError):
+            pass
+    return {"zip": os.path.basename(zip_path), "entries": {}}, st_path
+
+
+def handle_zip_root(
+    s3, bucket: str, farm_id: str, zip_path: str, exts: tuple, frac: float
+) -> bool:
+    """Archive every pending media entry of a zip individually (never the zip blob)."""
+    state, st_path = load_zip_state(zip_path)
+    entries = iter_zip_entries(zip_path, exts, set(state["entries"]))
+    made = False
+    for entry in entries:
+        bn = os.path.basename(entry)
+        raw_key = f"raw/{farm_id}/{bn}"
+        try:
+            with zipfile.ZipFile(zip_path) as zf:
+                zsize = zf.getinfo(entry).file_size
+        except (zipfile.BadZipFile, KeyError):
+            continue
+        # size-dedupe vs S3: same farm_id + basename + byte size = already archived
+        try:
+            head = s3.head_object(Bucket=bucket, Key=raw_key)
+            if int(head.get("ContentLength", -1)) == zsize:
+                LOG.info("%s %s already in S3 (size match); skip", farm_id, bn)
+                state["entries"][bn] = {
+                    "exists": True,
+                    "raw_url": f"{S3_ENDPOINT}/{bucket}/{raw_key}",
+                }
+                write_sidecar(st_path, state)
+                made = True
+                continue
+        except Exception:  # noqa: BLE001 - 404/NoSuchKey => upload below
+            pass
+        tmp = extract_zip_entry(zip_path, entry, tmpdir="/tmp")
+        try:
+            sc = archive_one(
+                s3, bucket, farm_id, tmp, None, frac, preview_dir="/tmp", as_name=bn
+            )
+            state["entries"][bn] = sc
+            write_sidecar(st_path, state)
+            LOG.info("%s %s -> raw + preview (sha %s)", farm_id, bn, sc["sha256"][:12])
+            made = True
+        finally:
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+    return made
 
 
 def s3_client(cfg: dict):
@@ -214,6 +322,15 @@ def run(cfg: dict, once: bool = False) -> None:
         for root in roots:
             farm_id = root.get("farm_id", "?")
             exts = tuple(root.get("extensions") or list(DEFAULT_EXTENSIONS))
+            zip_path = root.get("zip")
+            if zip_path:
+                try:
+                    if handle_zip_root(s3, bucket, farm_id, zip_path, exts, frac):
+                        made = True
+                except Exception as exc:  # noqa: BLE001 - keep the loop alive
+                    LOG.error("%s zip %s failed: %s", farm_id, zip_path, exc)
+                    time.sleep(BACKOFF_ERROR_S)
+                continue
             for src, marker in iter_raws(root.get("path", ""), exts):
                 try:
                     sc = archive_one(s3, bucket, farm_id, src, marker, frac)
@@ -225,9 +342,7 @@ def run(cfg: dict, once: bool = False) -> None:
                     )
                     made = True
                 except Exception as exc:  # noqa: BLE001 - keep the loop alive
-                    LOG.error(
-                        "%s %s failed: %s", farm_id, os.path.basename(src), exc
-                    )
+                    LOG.error("%s %s failed: %s", farm_id, os.path.basename(src), exc)
                     time.sleep(BACKOFF_ERROR_S)
         if once:
             return
