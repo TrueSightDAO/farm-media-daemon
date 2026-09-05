@@ -15,6 +15,7 @@ Every farm's media (photos + videos) needs to reach YouTube and the shared manif
 5. **Any Sophia can read/commit.** The manifests are the index; querying is just reading them. Midstream handoff between Sophias works from any thread.
 6. **The governor can query any Sophia.** "Find me cacao-processing videos from Cleide" — answered from manifests, across photos + videos.
 7. **Provenance in every sidecar.** `produced_by`, `generated` timestamps — so stale/wrong metadata is attributable.
+8. **Capture time, raw blob, and preview are first-class.** `captured_at` (ISO-8601, harvested from the original MOV/HEIC at intake — ffmpeg drops it, so capture it BEFORE transcode), `raw_url` (stable pointer to the raw original in S3), and `preview` (frame JPG in farm-media-raw). The manifest is the full index: what / where / when / preview.
 
 ## 3. Layout
 
@@ -34,6 +35,9 @@ media_archive_inbox/<source>/<farm_id>/
   "gps": "-3.4146, -52.6285",
   "objects": ["person", "cacao_pods"],
   "duration_s": 34.2,
+  "captured_at": "2024-07-02T14:22:11-03:00",
+  "raw_url": "https://s3.us-east-1.amazonaws.com/media.agroverse.shop/raw/cleide/IMG_4859.MOV",
+  "preview": "cleide/previews/IMG_4859.jpg",
   "title": "Fazenda Cleide — IMG_4859 (cacao)",
   "description": "Cacao farm visit, Cleide & Marcelo, CEPOTX, Para, Brazil.",
   "tags": ["cacao", "agroverse", "para"],
