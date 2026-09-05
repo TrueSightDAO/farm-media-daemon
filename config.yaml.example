@@ -28,10 +28,21 @@ archive:
   region: us-east-1
   preview_frame_frac: 0.25   # frame at 25% duration
   roots:
+    # FORM 1 — extracted directory of originals:
     - farm_id: cleide
       path: /home/ubuntu/cleide_media
     - farm_id: paulo-la-do-sitio
       path: /home/ubuntu/la_do_sitio_work
+
+    # FORM 2 — zip of originals (archives each ENTRY individually,
+    # never the zip blob — see MEDIA_ARCHIVE_PIPELINE.md ZIP HANDLING RULE).
+    # Each real media file inside is streamed to temp, sha256'd, given a
+    # captured_at + preview frame, uploaded to raw/<farm>/ + previews/<farm>/,
+    # then a durable state file <zip>.archive.json is written (resume-safe).
+    # __MACOSX/ and ._ AppleDouble junk entries are skipped automatically.
+    - farm_id: cacao-variety-parap
+      zip: /home/ubuntu/cacao_variety_parap.zip
+      extensions: [.MOV, .mov, .mp4, .HEIC, .heic, .JPG, .jpg]
 
 # Sleep window: uploads pause 07:00-07:05 UTC for quota reset (configurable)
 quota_reset_utc: "07:05"
