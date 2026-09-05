@@ -1,0 +1,15 @@
+[Unit]
+Description=Farm Media Archive Worker - raw originals to S3 media.agroverse.shop
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+EnvironmentFile=/opt/truesight_autopilot/.env
+ExecStart=/opt/truesight_autopilot/.venv/bin/python /opt/truesight_autopilot/farm_media_daemon/farm_media_archive.py --config /opt/truesight_autopilot/media_archive_daemon_config.yaml --log-file /tmp/farm_media_archive.log
+Restart=always
+RestartSec=30
+
+[Install]
+WantedBy=multi-user.target

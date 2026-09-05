@@ -20,6 +20,19 @@ inboxes:
     path: /home/ubuntu/media_archive_inbox/farm-media/paulo-la-do-sitio
     priority: 1
 
+# Raw archive worker (farm_media_archive.py) — originals -> S3 media.agroverse.shop
+# Raws follow bucket lifecycle (STANDARD_IA @30d -> DEEP_ARCHIVE @180d);
+# previews/ has NO lifecycle rule so previews stay HOT.
+archive:
+  bucket: media.agroverse.shop
+  region: us-east-1
+  preview_frame_frac: 0.25   # frame at 25% duration
+  roots:
+    - farm_id: cleide
+      path: /home/ubuntu/cleide_media
+    - farm_id: paulo-la-do-sitio
+      path: /home/ubuntu/la_do_sitio_work
+
 # Sleep window: uploads pause 07:00-07:05 UTC for quota reset (configurable)
 quota_reset_utc: "07:05"
 
