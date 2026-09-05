@@ -1,5 +1,5 @@
 [Unit]
-Description=Farm Media Archive Worker - raw originals to S3 media.agroverse.shop
+Description=Media Archive Daemon - S3 raw archive worker (raw + hot previews to media.agroverse.shop)
 After=network-online.target
 Wants=network-online.target
 

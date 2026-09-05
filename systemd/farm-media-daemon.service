@@ -1,5 +1,5 @@
 [Unit]
-Description=Farm Media Daemon - shared YouTube uploader
+Description=Media Archive Daemon - YouTube uploader worker
 After=network-online.target
 Wants=network-online.target
 
