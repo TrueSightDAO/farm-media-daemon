@@ -12,3 +12,5 @@ farm_media_inbox/
 *.MOV
 *.HEIC
 *.jpg
+__pycache__/
+*.pyc

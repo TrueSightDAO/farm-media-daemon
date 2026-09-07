@@ -8,7 +8,8 @@ then pushes via the normal PR flow. The daemon itself never touches GitHub.
 Schema follows the committed farm_media_manifests repo: top-level
 farm_id/plots/source_zips/generated/processed_by/counts/gps_coverage/items,
 items with numeric latitude/longitude (parsed from the sidecar's gps string),
-gps_raw, basename/ext, sha256, duration_s, objects, yt_id, uploaded_at, error.
+gps_raw, basename/ext, sha256, duration_s, objects, description, place_name,
+place_address, place_id, yt_id, uploaded_at, error.
 """
 
 import argparse
@@ -90,6 +91,10 @@ def main() -> int:
                 "longitude": lon,
                 "gps_raw": gps_raw,
                 "objects": side.get("objects", []),
+                "description": side.get("description"),
+                "place_name": side.get("place_name"),
+                "place_address": side.get("place_address"),
+                "place_id": side.get("place_id"),
                 "yt_id": side.get("yt_id"),
                 "uploaded_at": side.get("uploaded_at"),
                 "error": side.get("error"),

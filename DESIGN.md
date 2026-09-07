@@ -49,6 +49,9 @@ media_archive_inbox/<source>/<farm_id>/        # YouTube worker queue
   "vtt": "IMG_4859.mp4.en.vtt",
   "caption_track": null,
   "description_uploaded": false,
+  "place_name": "Medicilândia",
+  "place_address": "G26M+88 - Medicilândia, PA, 68145-000, Brazil",
+  "place_id": "ChIJCRpKnSafjZIRbu0z4mXgvcI",
   "tags": ["cacao", "agroverse", "para"],
   "privacy": "public",
   "produced_by": "sophia",
@@ -114,7 +117,7 @@ while True:
 - `farm-media-queue list [--farm <id>] [--with yt_id]` — status: uploaded / pending / needs_metadata / error.
 - `farm-media-manifest commit <farm_id>` — aggregate sidecars → `farm_media_manifests/<farm>.json` and open a PR (repo TrueSightDAO/farm_media_manifests).
 - `farm_media_archive.py --once` — run one S3-archive pass (testing).
-- `farm_media_captions.py enrich` — transcribe+translate inbox videos to English; writes `<file>.mp4.en.vtt` WebVTT + sets sidecar `transcript_en` and makes the EN translation the `description` (original preserved as `description_original`). Runs pre-upload so new videos ship with captions.
+- `farm_media_captions.py enrich` — transcribe+translate inbox videos to English; writes `<file>.mp4.en.vtt` WebVTT + sets sidecar `transcript_en` and makes the EN translation the `description` (original preserved as `description_original`). When the sidecar has GPS, also reverse-geocodes it (Google Geocoding API, `farm_media_geo.py`) and weaves a "📍 Place, Region" line into the description, storing `place_name` / `place_address` / `place_id`. Runs pre-upload so new videos ship with captions.
 - `farm_media_captions.py backfill` — enrich, then for every already-uploaded video (has `yt_id`) attach the caption track (`captions().insert`) and push the EN description (`videos().update`, snippet-preserving). 429-aware with backoff, resume-safe.
 - `farm-media-daemon` — the daemon itself.
 

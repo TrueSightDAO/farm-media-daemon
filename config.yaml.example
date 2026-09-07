@@ -60,3 +60,10 @@ captions:
   model: base            # faster-whisper model: base | small | medium
   language: pt           # source audio language (task="translate" to English)
 
+# Geo enrichment (farm_media_geo.py) — reverse-geocode sidecar GPS → place
+# label woven into the video description (📍 Place, Region). Requires a Google
+# Geocoding API key; when absent the description simply omits the place line.
+geo:
+  api_key_env: GOOGLE_MAPS_API_KEY   # env var holding the Maps/Geocoding key
+  cache_path: /tmp/farm_media_geo_cache.json   # dedupe cache (farms share GPS)
+

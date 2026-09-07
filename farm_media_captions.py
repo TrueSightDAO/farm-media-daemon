@@ -8,6 +8,11 @@ and make the English translation the video description. After upload the .vtt
 is attached as a real YouTube caption track (toggleable, searchable -- no
 burned pixels). Already-uploaded videos get the same treatment via backfill.
 
+When the sidecar carries GPS the description gains a 3rd location line
+("\U0001f4cd Place, Region") reverse-geocoded from the Google Geocoding API
+(see farm_media_geo.py); the resolved place is stored back in the sidecar as
+place_name / place_address / place_id. Runs only when a Maps key is present.
+
 Design notes
 ------------
 * This worker is deliberately separate from the upload daemon, mirroring how
@@ -30,6 +35,11 @@ import sys
 import time
 
 import yaml
+
+try:
+    import farm_media_geo as geo
+except Exception:  # pragma: no cover - importable standalone
+    geo = None
 
 LOG = logging.getLogger("farm_media_captions")
 
@@ -64,16 +74,28 @@ def build_vtt(segments) -> str:
     return "WEBVTT\n\n" + "\n\n".join(cues) + "\n"
 
 
-def build_description(transcript: str, existing: str = "") -> str:
+def build_description(transcript: str, existing: str = "", place: str = "") -> str:
     """The video description is the English translation (governor directive).
 
-    Keeps a short existing context line when the transcript is empty (no
-    speech / instrumental clip), otherwise the translation stands alone.
+    3-line layout (governor, 2026-09-07): context intro, then a place line,
+    then the English translation. The place line is omitted when no GPS /
+    reverse-geocode result exists; the context intro is kept when the
+    transcript is empty (no speech / instrumental clip).
     """
     t = (transcript or "").strip()
-    if not t:
-        return (existing or "").strip()[:DESC_MAX_CHARS]
-    return t[:DESC_MAX_CHARS]
+    ex = (existing or "").strip()
+    pl = (place or "").strip()
+    parts = []
+    if ex:
+        parts.append(ex)
+    if pl:
+        # Pin location when a farm video actually has one (fallback: no line).
+        parts.append("\U0001f4cd " + pl)  # U+1F4CD location pin
+    if t:
+        parts.append(t)
+    if not parts:
+        return ""
+    return "\n\n".join(parts)[:DESC_MAX_CHARS]
 
 
 # --------------------------------------------------------------------------- whisper
@@ -161,6 +183,30 @@ def _write_sidecar(sc: str, sidecar: dict) -> None:
     os.replace(tmp, sc)
 
 
+_GEO_CACHE = None
+
+
+def _load_geo_key(env_name: str) -> None:
+    """Pull the Maps key from a named env var (config geo.api_key_env)."""
+    if not env_name:
+        return
+    val = os.environ.get(env_name)
+    if val and val.startswith("AIza") and not os.environ.get("GOOGLE_MAPS_API_KEY"):
+        os.environ["GOOGLE_MAPS_API_KEY"] = val
+
+
+def _geo_cache():
+    """Process-wide dedupe cache for reverse geocoding (farms share points)."""
+    global _GEO_CACHE
+    if _GEO_CACHE is None and geo is not None:
+        _GEO_CACHE = geo.GeoCache(
+            path=os.environ.get(
+                "FARM_MEDIA_GEO_CACHE", "/tmp/farm_media_geo_cache.json"
+            )
+        )
+    return _GEO_CACHE
+
+
 # --------------------------------------------------------------------------- actions
 def enrich_one(mp4: str, sc: str, sidecar: dict, model: str, lang: str) -> bool:
     """Transcribe+translate to English; write .vtt; set sidecar description.
@@ -178,8 +224,22 @@ def enrich_one(mp4: str, sc: str, sidecar: dict, model: str, lang: str) -> bool:
     # translation the live description (governor directive).
     if sidecar.get("description"):
         sidecar.setdefault("description_original", sidecar["description"])
+    # Reverse-geocode GPS -> place label when present (never raises; no key or
+    # no GPS => no place line, description falls back gracefully).
+    place = ""
+    if geo is not None:
+        gps = sidecar.get("gps")
+        lat, lon, _raw = geo.parse_gps(gps)
+        if lat is not None and lon is not None:
+            cache = _geo_cache()
+            res = cache.reverse(lat, lon)
+            if res:
+                place = geo.place_label(lat, lon, cache) or ""
+                sidecar["place_name"] = res.get("place_name")
+                sidecar["place_address"] = res.get("formatted_address")
+                sidecar["place_id"] = res.get("place_id")
     sidecar["description"] = build_description(
-        text, sidecar.get("description_original", "")
+        text, sidecar.get("description_original", ""), place
     )
     _write_sidecar(sc, sidecar)
     return True
@@ -264,7 +324,8 @@ def load_config(path: str) -> dict:
 def main() -> int:
     ap = argparse.ArgumentParser(description="Farm Media Captions (pt->en)")
     ap.add_argument(
-        "--config", default="/opt/truesight_autopilot/farm_media_daemon/media_archive_daemon_config.yaml"
+        "--config",
+        default="/opt/truesight_autopilot/farm_media_daemon/media_archive_daemon_config.yaml",
     )
     ap.add_argument(
         "--token", default="/opt/truesight_autopilot/config/youtube/youtube_token.json"
@@ -293,6 +354,11 @@ def main() -> int:
     cap = cfg.get("captions") or {}
     model = args.model or cap.get("model", "base")
     lang = args.lang or cap.get("language", DEFAULT_LANG)
+    gcfg = cfg.get("geo") or {}
+    if gcfg.get("cache_path"):
+        os.environ["FARM_MEDIA_GEO_CACHE"] = gcfg["cache_path"]
+    if gcfg.get("api_key_env"):
+        _load_geo_key(gcfg["api_key_env"])
     if args.action == "enrich":
         run_enrich(cfg, model, lang)
     else:
