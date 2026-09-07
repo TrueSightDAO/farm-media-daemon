@@ -44,6 +44,11 @@ media_archive_inbox/<source>/<farm_id>/        # YouTube worker queue
   "preview": "previews/cleide/IMG_4859.jpg",
   "title": "Fazenda Cleide — IMG_4859 (cacao)",
   "description": "Cacao farm visit, Cleide & Marcelo, CEPOTX, Para, Brazil.",
+  "description_original": "Cacao farm visit, Cleide & Marcelo, CEPOTX, Para, Brazil.",
+  "transcript_en": "English translation of the (Portuguese) audio...",
+  "vtt": "IMG_4859.mp4.en.vtt",
+  "caption_track": null,
+  "description_uploaded": false,
   "tags": ["cacao", "agroverse", "para"],
   "privacy": "public",
   "produced_by": "sophia",
@@ -109,6 +114,8 @@ while True:
 - `farm-media-queue list [--farm <id>] [--with yt_id]` — status: uploaded / pending / needs_metadata / error.
 - `farm-media-manifest commit <farm_id>` — aggregate sidecars → `farm_media_manifests/<farm>.json` and open a PR (repo TrueSightDAO/farm_media_manifests).
 - `farm_media_archive.py --once` — run one S3-archive pass (testing).
+- `farm_media_captions.py enrich` — transcribe+translate inbox videos to English; writes `<file>.mp4.en.vtt` WebVTT + sets sidecar `transcript_en` and makes the EN translation the `description` (original preserved as `description_original`). Runs pre-upload so new videos ship with captions.
+- `farm_media_captions.py backfill` — enrich, then for every already-uploaded video (has `yt_id`) attach the caption track (`captions().insert`) and push the EN description (`videos().update`, snippet-preserving). 429-aware with backoff, resume-safe.
 - `farm-media-daemon` — the daemon itself.
 
 ## 6. Query patterns (governor → any Sophia)
@@ -120,6 +127,7 @@ while True:
 ## 7. Non-goals
 
 - No transcode/GPS/detect in the daemon (those stay per-farm; memory-heavy).
+- Captions/transcription also stay OUT of the daemon (farm_media_captions.py is a separate enrichment worker, like farm_media_archive.py — whisper is CPU/memory-heavy per file and the daemon stays dumb).
 - No automatic GitHub commits.
 - No deletion of originals without a committed manifest + governor approval.
 - No private data in the repo (public by design; creds live in `config/youtube/*.json` + `.env`, gitignored).
