@@ -37,6 +37,17 @@ def test_build_description():
     assert len(long) <= fc.DESC_MAX_CHARS
 
 
+def test_build_description_3line_place():
+    d = fc.build_description("English trans.", "Farm context.", "Medicilândia, Pará")
+    assert d == "Farm context.\n\n\U0001f4cd Medicilândia, Pará\n\nEnglish trans."
+    # place omitted when absent -> 2-line context+transcript
+    d2 = fc.build_description("English trans.", "Farm context.", "")
+    assert d2 == "Farm context.\n\nEnglish trans."
+    # context omitted when empty, place kept
+    d3 = fc.build_description("English trans.", "", "Itaituba, Pará")
+    assert d3 == "\U0001f4cd Itaituba, Pará\n\nEnglish trans."
+
+
 def test_enrich_one_writes_vtt_and_swaps_description(tmp_path, monkeypatch):
     mp4 = tmp_path / "clip.mp4"
     mp4.write_bytes(b"fake")
@@ -59,7 +70,9 @@ def test_enrich_one_writes_vtt_and_swaps_description(tmp_path, monkeypatch):
     assert out["transcript_en"] == "Ola mundo"
     assert out["vtt"] == "clip.mp4.en.vtt"
     assert out["description_original"] == "orig ctx"
-    assert out["description"] == "Ola mundo"
+    # 3-line layout keeps the context intro (governor, 2026-09-07); no GPS in
+    # this sidecar, so no place line is woven in.
+    assert out["description"] == "orig ctx\n\nOla mundo"
     assert (tmp_path / "clip.mp4.en.vtt").exists()
 
 
