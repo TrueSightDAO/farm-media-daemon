@@ -6,6 +6,7 @@ One service, **two background workers**:
 
 1. **YouTube worker** (`farm_media_daemon.py`) — transcoded videos + sidecars land in the inbox queue; the worker uploads to YouTube and writes the `yt_id` back.
 2. **S3 archive worker** (`farm_media_archive.py`) — raw originals + preview frames → `media.agroverse.shop` (`raw/<farm>/` + hot `previews/<farm>/`); computes sha256, reads `captured_at` from the original, writes a resume-safe `<file>.raw.json` marker.
+3. **Captions worker** (`farm_media_captions.py`) — pt→en transcript enrichment. Transcribes each inbox video's (typically Portuguese) audio with faster-whisper (`task="translate"`), writes a WebVTT file beside the mp4, and makes the English translation the video **description**. After upload the `.vtt` is attached as a real **YouTube caption track** (toggleable, searchable). `backfill` subcommand enriches already-uploaded videos (sidecar `yt_id` present) the same way. See DESIGN.md §5.
 
 It **never touches GitHub** — manifests are committed deliberately by a Sophia or the CLI.
 
@@ -34,6 +35,8 @@ It **never touches GitHub** — manifests are committed deliberately by a Sophia
 - `farm-media-queue list [--farm <id>]` — uploaded / pending / needs_metadata / error.
 - `farm-media-manifest commit <farm_id>` — commit step.
 - `farm_media_archive.py --once` — run one archive pass (S3 worker) for testing.
+- `farm-media-captions enrich` — transcribe+translate inbox videos to English (writes `.vtt` + sets description in sidecar).
+- `farm-media-captions backfill` — enrich, then attach caption tracks + EN descriptions to already-uploaded videos (429-aware).
 - `farm-media-daemon` — run the daemon (systemd unit provided).
 
 ## Systemd
