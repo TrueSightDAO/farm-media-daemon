@@ -52,3 +52,11 @@ defaults:
   privacy: public
   tags: [cacao, agroverse]
   description_footer: "Cacao farm visit, CEPOTX, Para, Brazil."
+
+# Captions worker (farm_media_captions.py) — pt->en transcript enrichment
+# Runs BEFORE upload so new videos ship with English captions + description.
+# backfill subcommand also enriches already-uploaded videos.
+captions:
+  model: base            # faster-whisper model: base | small | medium
+  language: pt           # source audio language (task="translate" to English)
+
