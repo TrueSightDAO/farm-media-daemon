@@ -283,7 +283,10 @@ def run_enrich(cfg: dict, model: str, lang: str) -> int:
 
 def run_backfill(cfg: dict, token_path: str, model: str, lang: str) -> int:
     """Enrich every inbox video missing a transcript, then attach captions +
-    description to every already-uploaded one. Resume-safe + 429-aware."""
+    description to every already-uploaded one. Resume-safe + quota-aware:
+    YouTube's daily caption quota is a hard wall, so on quotaExceeded the pass
+    stops (re-run after the reset picks up where it left off) instead of
+    spinning in a retry loop until the quota window rolls over."""
     yt = _youtube(token_path)
     done = 0
     for inbox in cfg.get("inboxes", []):
@@ -292,12 +295,18 @@ def run_backfill(cfg: dict, token_path: str, model: str, lang: str) -> int:
             try:
                 enrich_one(mp4, sc, sidecar, model, lang)
                 if sidecar.get("yt_id") and not sidecar.get("caption_track"):
+                    # Silent videos transcribe to an empty transcript; attaching
+                    # an empty VTT wastes scarce daily quota, so skip them.
+                    if not (sidecar.get("transcript_en") or "").strip():
+                        LOG.info("skipping attach for silent %s", os.path.basename(mp4))
+                        continue
+                    retries = 0
                     while True:
                         try:
                             if attach_one(yt, sc, sidecar, path):
                                 done += 1
                             break
-                        except Exception as exc:  # 429 / rate-limit retry
+                        except Exception as exc:  # 429 / rate-limit / quota
                             low = str(exc).lower()
                             if (
                                 "quota" not in low
@@ -308,7 +317,26 @@ def run_backfill(cfg: dict, token_path: str, model: str, lang: str) -> int:
                                     "attach failed %s: %s", os.path.basename(mp4), exc
                                 )
                                 break
-                            LOG.warning("quota hit; sleeping %ss: %s", BACKOFF_S, exc)
+                            if "quota" in low:
+                                # Hard daily wall; spinning only burns the pass.
+                                # Stop here - resume-safe, re-run after reset.
+                                LOG.warning(
+                                    "daily quota exhausted on %s - stopping pass "
+                                    "(resume-safe; re-run after reset)",
+                                    os.path.basename(mp4),
+                                )
+                                return done
+                            retries += 1
+                            if retries > 10:
+                                LOG.error(
+                                    "giving up on %s after %d rate-limit retries",
+                                    os.path.basename(mp4),
+                                    retries,
+                                )
+                                break
+                            LOG.warning(
+                                "rate limited; sleeping %ss: %s", BACKOFF_S, exc
+                            )
                             time.sleep(BACKOFF_S)
                 time.sleep(1)  # gentle pacing between videos
             except Exception as exc:
