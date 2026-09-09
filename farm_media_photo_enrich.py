@@ -50,6 +50,8 @@ LOG = logging.getLogger("farm_media_photo_enrich")
 PHOTO_EXTS = (".heic", ".heif", ".jpg", ".jpeg", ".png")
 GROK_ENDPOINT = "https://api.x.ai/v1/chat/completions"
 GROK_MODEL = "grok-4-1-fast-non-reasoning"
+GEMINI_ENDPOINT = "https://generativelanguage.googleapis.com/v1beta/models"
+GEMINI_MODEL = "gemini-3-flash-preview"  # project key: 2.5.x is 404 for new users; 3.x works
 OCR_LANG = "por"
 TESS_PSM = "3"
 MAX_SIDE = 1600  # downscale large originals before the vision call
@@ -113,20 +115,19 @@ def _ocr_pt(jpeg: str) -> str:
 
 
 def _vision(jpeg: str) -> dict:
-    """One Grok vision call -> ocr_text_en/scene/caption_en/objects[].
+    """Vision pass -> ocr_text_en/scene/caption_en/objects[].
 
-    Returns {} when GROK_API_KEY is unset or the call fails, so enrichment
-    degrades to OCR-only rather than ever blocking the archive pass.
+    Provider: Grok by default (reliable + fast under bulk backfill). Gemini is
+    measurably better at rendering foreign-language slide text into English
+    (A/B on real Medicilandia photos 2026-09-09) but its image API on the
+    project key is rate-limited (intermittent 403), so it is the QUALITY
+    fallback and one env var away: FARM_MEDIA_VISION_PROVIDER=gemini.
+    Env-configurable: FARM_MEDIA_VISION_PROVIDER=gemini|grok,
+    FARM_MEDIA_GEMINI_MODEL / FARM_MEDIA_GROK_MODEL.
+
+    Returns {} when no key is set or the call fails, so enrichment degrades
+    to OCR-only rather than ever blocking the archive pass.
     """
-    api_key = os.environ.get("GROK_API_KEY")
-    if not api_key:
-        return {}
-    try:
-        with open(jpeg, "rb") as fh:
-            b64 = base64.b64encode(fh.read()).decode("ascii")
-    except OSError as exc:
-        LOG.warning("vision read failed: %s", exc)
-        return {}
     prompt = (
         "You are analyzing a photo from a cacao-farming convention in Para/"
         "Bahia, Brazil. Respond with STRICT JSON only, no prose:"
@@ -136,8 +137,81 @@ def _vision(jpeg: str) -> dict:
         '"caption_en": "<one English sentence describing the photo>", '
         '"objects": ["<salient noun>", ...]}'
     )
+    try:
+        with open(jpeg, "rb") as fh:
+            b64 = base64.b64encode(fh.read()).decode("ascii")
+    except OSError as exc:
+        LOG.warning("vision read failed: %s", exc)
+        return {}
+    provider = os.environ.get("FARM_MEDIA_VISION_PROVIDER", "grok").lower()
+    # Grok first: reliable + fast under bulk backfill; Gemini (better foreign-
+    # text translation) is the quality fallback and stays one env var away.
+    if provider == "gemini":
+        out = _vision_gemini(prompt, b64)
+        return out or _vision_grok(prompt, b64)  # gemini fallback -> grok
+    out = _vision_grok(prompt, b64)
+    if out:
+        return out
+    return _vision_gemini(prompt, b64)  # grok fallback -> gemini
+
+
+def _call_llm_json(url, headers, payload, tag: str) -> dict:
+    """POST once and parse STRICT-JSON reply into the 4 fields. Returns {} on any failure."""
+    try:
+        import httpx  # lazy
+
+        resp = httpx.post(url, headers=headers, json=payload, timeout=120)
+        resp.raise_for_status()
+        content = resp.json()
+        if tag == "gemini":
+            txt = content["candidates"][0]["content"]["parts"][0]["text"]
+        else:
+            txt = content["choices"][0]["message"]["content"]
+        txt = txt.strip()
+        if txt.startswith("```"):  # strip markdown fences if wrapped
+            txt = txt.split("\n", 1)[-1].rsplit("```", 1)[0]
+        out = json.loads(txt)
+        return {
+            "ocr_text_en": out.get("ocr_text_en", ""),
+            "scene": out.get("scene", ""),
+            "caption_en": out.get("caption_en", ""),
+            "objects": out.get("objects") or [],
+        }
+    except Exception as exc:  # noqa: BLE001 - vision must never block archive
+        LOG.warning("%s vision failed: %s", tag, exc)
+        return {}
+
+
+def _vision_gemini(prompt: str, b64: str) -> dict:
+    api_key = os.environ.get("GEMINI_API_KEY")
+    if not api_key:
+        return {}
+    model = os.environ.get("FARM_MEDIA_GEMINI_MODEL", GEMINI_MODEL)
+    body = {
+        "contents": [
+            {
+                "parts": [
+                    {"text": prompt},
+                    {"inline_data": {"mime_type": "image/jpeg", "data": b64}},
+                ]
+            }
+        ]
+    }
+    return _call_llm_json(
+        f"{GEMINI_ENDPOINT}/{model}:generateContent",
+        {},
+        body,
+        "gemini",
+    )
+
+
+def _vision_grok(prompt: str, b64: str) -> dict:
+    api_key = os.environ.get("GROK_API_KEY")
+    if not api_key:
+        return {}
+    model = os.environ.get("FARM_MEDIA_GROK_MODEL", GROK_MODEL)
     payload = {
-        "model": os.environ.get("FARM_MEDIA_GROK_MODEL", GROK_MODEL),
+        "model": model,
         "messages": [
             {
                 "role": "user",
@@ -153,29 +227,7 @@ def _vision(jpeg: str) -> dict:
         "max_tokens": 400,
         "temperature": 0.1,
     }
-    try:
-        import httpx  # lazy
-
-        resp = httpx.post(
-            GROK_ENDPOINT,
-            headers={"Authorization": f"Bearer {api_key}"},
-            json=payload,
-            timeout=120,
-        )
-        resp.raise_for_status()
-        content = resp.json()["choices"][0]["message"]["content"].strip()
-        if content.startswith("```"):  # strip markdown fences if wrapped
-            content = content.split("\n", 1)[-1].rsplit("```", 1)[0]
-        out = json.loads(content)
-        return {
-            "ocr_text_en": out.get("ocr_text_en", ""),
-            "scene": out.get("scene", ""),
-            "caption_en": out.get("caption_en", ""),
-            "objects": out.get("objects") or [],
-        }
-    except Exception as exc:  # noqa: BLE001 - vision must never block archive
-        LOG.warning("grok vision failed: %s", exc)
-        return {}
+    return _call_llm_json(GROK_ENDPOINT, {"Authorization": f"Bearer {api_key}"}, payload, "grok")
 
 
 # --------------------------------------------------------------------------- enrich
