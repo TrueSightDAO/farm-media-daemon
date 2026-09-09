@@ -74,7 +74,9 @@ def _decode_to_jpeg(src: str, dst_jpeg: str) -> bool:
         from PIL import Image  # lazy
 
         try:
-            import pillow_heif  # noqa: F401 - registers the HEIF opener
+            import pillow_heif
+
+            pillow_heif.register_heif_opener()  # HEIF must be registered or Image.open fails
         except Exception:  # pragma: no cover - HEIC without the plugin
             pass
         with Image.open(src) as im:
