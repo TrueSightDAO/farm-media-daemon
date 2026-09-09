@@ -302,7 +302,16 @@ def run_backfill(manifest_dir: str, limit: int = 0) -> int:
     import boto3  # lazy
 
     bucket = "media.agroverse.shop"
-    s3 = boto3.client("s3", region_name="us-east-1")
+    # Nelanco-prefixed creds are what the archive daemon uses (archive.py
+    # s3_client); bare client() would raise NoCredentialsError in that env.
+    kid = os.environ.get("AWS_ACCESS_KEY_ID_NELANCO")
+    sk = os.environ.get("AWS_SECRET_ACCESS_KEY_NELANCO")
+    if kid and sk:
+        s3 = boto3.client(
+            "s3", region_name="us-east-1", aws_access_key_id=kid, aws_secret_access_key=sk
+        )
+    else:
+        s3 = boto3.client("s3", region_name="us-east-1")  # chain/instance creds
     done = 0
     for fn in sorted(glob.glob(os.path.join(manifest_dir, "*.json"))):
         if os.path.basename(fn) == "index.json":
