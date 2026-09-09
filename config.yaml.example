@@ -63,9 +63,12 @@ captions:
 # Photo enrichment (farm_media_photo_enrich.py) -- OCR + vision tags for still
 # photos (HEIC/JPG/PNG). Runs at archive time so every NEW photo's manifest
 # record is English-searchable (ocr_text_pt / ocr_text_en / scene / caption_en
-# / objects). Needs tesseract (lang 'por') + GROK_API_KEY env var for the
-# vision pass; when either is absent enrichment degrades to whatever OCR gives.
-# Reuses archive.roots paths already watched -- no separate root list needed.
+# / objects). Vision provider: GROK_API_KEY by default (reliable under bulk
+# backfill); GEMINI_API_KEY is the higher-quality fallback for foreign-text
+# translation and can be made primary with FARM_MEDIA_VISION_PROVIDER=gemini.
+# Needs tesseract (lang 'por') + at least one vision key; when absent,
+# enrichment degrades to whatever OCR gives. Reuses archive.roots paths
+# already watched -- no separate root list needed.
 photo_enrich:
   enabled: true
 
