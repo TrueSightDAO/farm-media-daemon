@@ -39,6 +39,7 @@ LOG = logging.getLogger("farm_media_archive")
 S3_ENDPOINT = "https://s3.us-east-1.amazonaws.com"
 EXTOOLS = ("MediaCreateDate", "CreateDate", "CreationDate", "DateTimeOriginal")
 DEFAULT_EXTENSIONS = (".MOV", ".mov")
+_PHOTO_EXTS = (".heic", ".heif", ".jpg", ".jpeg", ".png")
 BACKOFF_ERROR_S = 60
 IDLE_S = 30
 
@@ -199,6 +200,15 @@ def archive_one(
         "produced_by": "farm-media-archive",
         "uploaded_at": dt.datetime.now(dt.timezone.utc).isoformat(),
     }
+    # Photo content enrichment (OCR pt + vision tags) -- still photos only;
+    # enrichment NEVER blocks the archive pass (failure logs + skips).
+    if os.path.splitext(basename)[1].lower() in _PHOTO_EXTS:
+        try:
+            from farm_media_photo_enrich import enrich_photo  # lazy
+
+            sidecar.update(enrich_photo(src, sidecar) or {})
+        except Exception as exc:  # noqa: BLE001 - enrichment must not block
+            LOG.warning("photo enrich skipped for %s: %s", basename, exc)
     if marker:
         write_sidecar(marker, sidecar)
     return sidecar
