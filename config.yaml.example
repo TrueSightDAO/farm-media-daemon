@@ -60,6 +60,15 @@ captions:
   model: base            # faster-whisper model: base | small | medium
   language: pt           # source audio language (task="translate" to English)
 
+# Photo enrichment (farm_media_photo_enrich.py) -- OCR + vision tags for still
+# photos (HEIC/JPG/PNG). Runs at archive time so every NEW photo's manifest
+# record is English-searchable (ocr_text_pt / ocr_text_en / scene / caption_en
+# / objects). Needs tesseract (lang 'por') + GROK_API_KEY env var for the
+# vision pass; when either is absent enrichment degrades to whatever OCR gives.
+# Reuses archive.roots paths already watched -- no separate root list needed.
+photo_enrich:
+  enabled: true
+
 # Geo enrichment (farm_media_geo.py) — reverse-geocode sidecar GPS → place
 # label woven into the video description (📍 Place, Region). Requires a Google
 # Geocoding API key; when absent the description simply omits the place line.
