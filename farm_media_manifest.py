@@ -21,7 +21,21 @@ from collections import Counter
 
 
 def _parse_gps(gps):
-    """Parse a sidecar gps string ('-3.4146, -52.6285') into (lat, lon, raw)."""
+    """Parse a sidecar gps value into (lat, lon, raw).
+
+    Delegates to farm_media_geo.parse_gps so the manifest and the daemon share
+    ONE parser. Sidecars may carry either decimal ("-3.41, -52.63") or the DMS
+    form exiftool emits from Apple media ("3 deg 33' 25.20\" S, ..."). The old
+    local implementation only understood decimal, so every DMS-carrying file
+    (MOV/HEIC from iPhone) landed as latitude=None in the manifest.
+    Falls back to a decimal-only parse if the geo module can't be imported.
+    """
+    try:
+        from farm_media_geo import parse_gps as _geo_parse_gps
+
+        return _geo_parse_gps(gps)
+    except Exception:
+        pass
     if not gps:
         return None, None, None
     try:
