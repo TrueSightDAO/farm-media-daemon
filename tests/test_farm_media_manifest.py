@@ -13,7 +13,7 @@ def test_parse_gps_decimal():
 def test_parse_gps_dms_string():
     """The bug: exiftool DMS output must resolve to decimal, not None."""
     lat, lon, raw = m._parse_gps(
-        '3 deg 33\' 25.20" S, 51 deg 6\' 13.32" W, 108.156 m Above Sea Level'
+        "3 deg 33' 25.20\" S, 51 deg 6' 13.32\" W, 108.156 m Above Sea Level"
     )
     assert raw is not None
     assert lat is not None and lon is not None
@@ -25,7 +25,7 @@ def test_parse_gps_matches_geo_parser():
     """Manifest parsing must agree with the daemon's own geo parser."""
     import farm_media_geo as g
 
-    s = '3 deg 24\' 56.52" S, 52 deg 36\' 54.00" W'
+    s = "3 deg 24' 56.52\" S, 52 deg 36' 54.00\" W"
     assert m._parse_gps(s) == g.parse_gps(s)
 
 
