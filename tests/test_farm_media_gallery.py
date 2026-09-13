@@ -159,6 +159,44 @@ def test_aspect_probe_injected():
     assert doc["gallery"][0]["aspect"] == "portrait"
 
 
+def test_site_asset_path_normalises_relative_src():
+    assert (
+        g.site_asset_path("../../assets/images/farms/x-y.jpg")
+        == "assets/images/farms/x-y.jpg"
+    )
+    assert g.site_asset_path("./a/b.png") == "a/b.png"
+    assert g.site_asset_path("a/b.png") == "a/b.png"
+
+
+def test_gallery_skips_image_absent_from_site():
+    items = [
+        _item(file="A.MOV", basename="A.MOV", yt_id="a"),
+        _item(file="P.HEIC", basename="P.HEIC", description="present"),
+        _item(file="Q.HEIC", basename="Q.HEIC", description="absent"),
+    ]
+    present = {"assets/images/farms/f-P.jpg"}
+    doc = g.build_gallery(items, "f", image_exists=lambda p: p in present)
+    srcs = [e["src"] for e in doc["gallery"] if e["type"] == "image"]
+    assert srcs == ["../../assets/images/farms/f-P.jpg"]
+    assert doc["hero"]["src"].endswith("f-P.jpg")
+
+
+def test_gallery_hero_uses_first_available_image():
+    items = [
+        _item(file="M.HEIC", basename="M.HEIC", description="missing"),
+        _item(file="N.HEIC", basename="N.HEIC", description="present"),
+    ]
+    present = {"assets/images/farms/f-N.jpg"}
+    doc = g.build_gallery(items, "f", image_exists=lambda p: p in present)
+    assert doc["hero"]["src"].endswith("f-N.jpg")
+
+
+def test_gallery_without_filter_keeps_all_images():
+    items = [_item(file="P.HEIC", basename="P.HEIC", description="d")]
+    doc = g.build_gallery(items, "f")
+    assert [e["type"] for e in doc["gallery"]] == ["image"]
+
+
 def test_manifest_loader_roundtrip(tmp_path=None):
     import tempfile
 

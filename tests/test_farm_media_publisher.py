@@ -257,6 +257,11 @@ def test_main_missing_token_errors(tmp_path, monkeypatch):
 
 def test_main_live_auth_failure_returns_1(tmp_path, monkeypatch):
     monkeypatch.setenv("TRUESIGHT_DAO_AUTOPILOT", "x")
+    monkeypatch.setattr(
+        pub.GitHubClient,
+        "list_tree_paths",
+        lambda self, branch="main": {"assets/images/farms/g-s1.jpg"},
+    )
 
     def boom(self, *a, **k):
         raise pub.AuthError("403")
@@ -266,4 +271,65 @@ def test_main_live_auth_failure_returns_1(tmp_path, monkeypatch):
     rc = pub.main(
         ["--inbox", inbox, "--no-aspect", "--collection", "g", "--retry-delay", "0"]
     )
+    assert rc == 1
+
+
+def test_publish_collection_filters_images_to_site_assets(tmp_path):
+    items = [
+        _sidecar_item(file="A.MOV", basename="A.MOV", yt_id="a"),
+        _sidecar_item(file="P.HEIC", basename="P.HEIC", yt_id=None),
+        _sidecar_item(file="Q.HEIC", basename="Q.HEIC", yt_id=None),
+    ]
+    inbox = _write_inbox(tmp_path, "g", items)
+    client = FakeClient()
+    present = {"assets/images/farms/g-P.jpg"}
+    r = pub.publish_collection(
+        client, "g", inbox=inbox, image_exists=lambda p: p in present
+    )
+    assert r["youtube"] == 1
+    doc = json.loads(client.files["galleries/g.json"])
+    srcs = [e["src"] for e in doc["gallery"] if e["type"] == "image"]
+    assert srcs == ["../../assets/images/farms/g-P.jpg"]
+
+
+def test_main_live_builds_image_filter_from_site_tree(tmp_path, monkeypatch):
+    monkeypatch.setenv("TRUESIGHT_DAO_AUTOPILOT", "x")
+    items = [
+        _sidecar_item(file="A.MOV", basename="A.MOV", yt_id="a"),
+        _sidecar_item(file="P.HEIC", basename="P.HEIC", yt_id=None),
+        _sidecar_item(file="Q.HEIC", basename="Q.HEIC", yt_id=None),
+    ]
+    inbox = _write_inbox(tmp_path, "g", items)
+    made = {}
+
+    def make(token, repo=pub.DEFAULT_REPO, **kw):
+        c = FakeClient()
+        c.repo = repo
+        c.list_tree_paths = lambda branch="main": {"assets/images/farms/g-P.jpg"}
+        made[repo] = c
+        return c
+
+    monkeypatch.setattr(pub, "GitHubClient", make)
+    rc = pub.main(
+        ["--inbox", inbox, "--no-aspect", "--collection", "g", "--retry-delay", "0"]
+    )
+    assert rc == 0
+    c = made["TrueSightDAO/farm_media_manifests"]
+    doc = json.loads(c.files["galleries/g.json"])
+    srcs = [e["src"] for e in doc["gallery"] if e["type"] == "image"]
+    assert srcs == ["../../assets/images/farms/g-P.jpg"]
+
+
+def test_main_live_refuses_empty_site_tree(tmp_path, monkeypatch):
+    monkeypatch.setenv("TRUESIGHT_DAO_AUTOPILOT", "x")
+    inbox = _write_inbox(tmp_path, "g", [_sidecar_item(yt_id="a")])
+
+    def make(token, repo=pub.DEFAULT_REPO, **kw):
+        c = FakeClient()
+        c.repo = repo
+        c.list_tree_paths = lambda branch="main": set()
+        return c
+
+    monkeypatch.setattr(pub, "GitHubClient", make)
+    rc = pub.main(["--inbox", inbox, "--no-aspect", "--collection", "g"])
     assert rc == 1

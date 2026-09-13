@@ -55,6 +55,8 @@ import farm_media_gallery as gallery
 API = "https://api.github.com"
 DEFAULT_REPO = "TrueSightDAO/farm_media_manifests"
 DEFAULT_INBOX = "/home/ubuntu/media_archive_inbox/farm-media"
+DEFAULT_SITE_REPO = "TrueSightDAO/agroverse_shop_beta"
+DEFAULT_SITE_BRANCH = "main"
 GALLERY_SUBDIR = "galleries"
 _USER_AGENT = "farm-media-publisher/1.0"
 
@@ -90,18 +92,16 @@ class GitHubClient:
         self.api = api.rstrip("/")
         self.timeout = timeout
 
-    def _request(self, method, path, body=None):
-        url = "{}/repos/{}/contents/{}".format(
-            self.api, self.repo, urllib.parse.quote(path)
-        )
-        data = json.dumps(body).encode("utf-8") if body is not None else None
-        req = urllib.request.Request(url, data=data, method=method)
+    def _headers(self, req):
+        """Attach the standard auth/accept headers to ``req``."""
         req.add_header("Authorization", "token " + self.token)
         req.add_header("Accept", "application/vnd.github+json")
         req.add_header("X-GitHub-Api-Version", "2022-11-28")
         req.add_header("User-Agent", _USER_AGENT)
-        if data is not None:
-            req.add_header("Content-Type", "application/json")
+        return req
+
+    def _send(self, req):
+        """Send ``req``: 404 -> None, 401/403 -> AuthError, else the JSON body."""
         try:
             with urllib.request.urlopen(req, timeout=self.timeout) as resp:
                 return json.loads(resp.read() or b"{}")
@@ -109,8 +109,35 @@ class GitHubClient:
             if exc.code == 404:
                 return None  # absent -- callers treat as "create"
             if exc.code in (401, 403):
-                raise AuthError("{} on {} {}".format(exc.code, method, path)) from exc
+                raise AuthError("{} on {}".format(exc.code, req.full_url)) from exc
             raise
+
+    def _request(self, method, path, body=None):
+        url = "{}/repos/{}/contents/{}".format(
+            self.api, self.repo, urllib.parse.quote(path)
+        )
+        data = json.dumps(body).encode("utf-8") if body is not None else None
+        req = urllib.request.Request(url, data=data, method=method)
+        self._headers(req)
+        if data is not None:
+            req.add_header("Content-Type", "application/json")
+        return self._send(req)
+
+    def list_tree_paths(self, branch="main"):
+        """Blob paths in the repo's tree at ``branch`` (recursive).
+
+        A missing repo/branch (404) yields an empty set; 401/403 raise
+        :class:`AuthError`. Lets the publisher confirm an image asset actually
+        exists in the site repo before emitting a ``src`` for it.
+        """
+        url = "{}/repos/{}/git/trees/{}?recursive=1".format(
+            self.api, self.repo, urllib.parse.quote(branch, safe="")
+        )
+        req = urllib.request.Request(url, method="GET")
+        self._headers(req)
+        data = self._send(req)
+        tree = (data or {}).get("tree") or []
+        return {t["path"] for t in tree if t.get("type") == "blob"}
 
     def get_content(self, path):
         """Return ``(text, blob_sha)`` for a file, or ``(None, None)`` if absent."""
@@ -153,6 +180,7 @@ def publish_collection(
     plot="",
     place="",
     aspect_probe=None,
+    image_exists=None,
 ):
     """Reconcile one collection. Returns a result dict.
 
@@ -178,7 +206,12 @@ def publish_collection(
         items = gallery.iter_sidecar_items(os.path.join(inbox, collection))
 
     doc = gallery.build_gallery(
-        items, collection, aspect_probe=aspect_probe, plot=plot, place=place
+        items,
+        collection,
+        aspect_probe=aspect_probe,
+        plot=plot,
+        place=place,
+        image_exists=image_exists,
     )
     text = _gallery_text(doc)
     youtube = sum(1 for e in doc["gallery"] if e.get("type") == "youtube")
@@ -217,6 +250,7 @@ def publish_all(
     only=None,
     aspect_probe=None,
     sleep=0.0,
+    image_exists=None,
 ):
     """Reconcile every inbox collection (or just ``only``). Idempotent overall."""
     collections = [only] if only else _collections_from_inbox(inbox)
@@ -230,6 +264,7 @@ def publish_all(
                     inbox=inbox,
                     outdir=outdir,
                     aspect_probe=aspect_probe,
+                    image_exists=image_exists,
                 )
             )
         except AuthError:
@@ -278,6 +313,16 @@ def main(argv=None) -> int:
     )
     ap.add_argument("--place", default="", help="place override for captions")
     ap.add_argument("--plot", default="", help="plot id override for captions")
+    ap.add_argument(
+        "--site-repo",
+        default=DEFAULT_SITE_REPO,
+        help="repo whose tracked assets gate image entries (default: %(default)s)",
+    )
+    ap.add_argument(
+        "--site-branch",
+        default=DEFAULT_SITE_BRANCH,
+        help="branch of --site-repo to read assets from (default: %(default)s)",
+    )
     ap.add_argument("--no-aspect", action="store_true", help="skip the ffprobe probe")
     ap.add_argument("--dry-run", action="store_true", help="report, write nothing")
     ap.add_argument("--retries", type=int, default=2)
@@ -291,6 +336,7 @@ def main(argv=None) -> int:
 
     if args.outdir is not None:
         client = _NullClient()
+        image_exists = None
     else:
         token = os.environ.get(args.token_env, "")
         if not token:
@@ -302,6 +348,31 @@ def main(argv=None) -> int:
             )
             return 1
         client = GitHubClient(token, repo=args.repo)
+        site_client = GitHubClient(token, repo=args.site_repo)
+        try:
+            paths = _publish_with_retry(
+                lambda: site_client.list_tree_paths(args.site_branch),
+                args.retries,
+                args.retry_delay,
+            )
+        except AuthError as exc:
+            print(
+                "ERROR: cannot read assets from {}@{}: {}".format(
+                    args.site_repo, args.site_branch, exc
+                ),
+                file=sys.stderr,
+            )
+            return 1
+        if not paths:
+            print(
+                "ERROR: no blobs in {}@{} -- refusing to publish (an empty tree "
+                "would drop every image)".format(args.site_repo, args.site_branch),
+                file=sys.stderr,
+            )
+            return 1
+
+        def image_exists(path):
+            return path in paths
 
     def run():
         return publish_all(
@@ -310,6 +381,7 @@ def main(argv=None) -> int:
             outdir=args.outdir,
             only=args.collection,
             aspect_probe=probe,
+            image_exists=image_exists,
         )
 
     try:
