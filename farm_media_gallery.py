@@ -45,6 +45,24 @@ CAPTION_MAX_CHARS = 200
 DEFAULT_INTRO = "Site walk {day} {month} {year}"
 DEFAULT_IMAGE_SRC = "../../assets/images/farms/{slug}-{stem}.jpg"
 
+
+def site_asset_path(src: str) -> str:
+    """Map a gallery entry's relative ``src`` to a site-repo-relative path.
+
+    Entries live at ``farms/<collection>/media.json`` on the site, so their
+    ``src`` starts with ``../../`` -- e.g.
+    ``../../assets/images/farms/x-y.jpg``. Strip leading ``./``/``../`` segments
+    so the result is the path as it appears from the site repo root
+    (``assets/images/farms/x-y.jpg``), which a caller can test for membership
+    against the repo's tracked blobs.
+    """
+    p = str(src or "")
+    while p.startswith("../"):
+        p = p[3:]
+    while p.startswith("./"):
+        p = p[2:]
+    return p
+
 DOT = " " + chr(0xB7) + " "
 DASH = " " + chr(0x2014) + " "
 ELLIPSIS = chr(0x2026)
@@ -273,8 +291,15 @@ def build_gallery(
     place: str = "",
     plot: str = "",
     hero=None,
+    image_exists=None,
 ):
-    """Deterministically build a ``media.json`` document from MAP items."""
+    """Deterministically build a ``media.json`` document from MAP items.
+
+    ``image_exists`` (optional) is a predicate over a *site-repo-relative* asset
+    path (see :func:`site_asset_path`). When supplied, image items whose
+    generated ``src`` is not confirmed present are dropped, so the published
+    gallery can never point at a missing file.
+    """
     gallery = []
     for item in sorted(items, key=_order_key):
         name = item.get("basename") or item.get("file") or ""
@@ -299,10 +324,14 @@ def build_gallery(
             gallery.append(entry)
         elif kind == "image":
             stem = os.path.splitext(os.path.basename(name))[0]
+            src = image_src_template.format(slug=collection, stem=stem)
+            if image_exists is not None and not image_exists(site_asset_path(src)):
+                # Asset absent from the site repo -- rendering it would 404.
+                continue
             gallery.append(
                 {
                     "type": "image",
-                    "src": image_src_template.format(slug=collection, stem=stem),
+                    "src": src,
                     "alt": _first_line(item.get("description")) or stem,
                 }
             )
