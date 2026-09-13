@@ -1,0 +1,10 @@
+[Unit]
+Description=Media Archive Daemon - gallery publisher (idempotent reconcile -> farm_media_manifests)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=ubuntu
+EnvironmentFile=/opt/truesight_autopilot/.env
+ExecStart=/opt/truesight_autopilot/.venv/bin/python /opt/truesight_autopilot/farm_media_daemon/farm_media_publisher.py --inbox /home/ubuntu/media_archive_inbox/farm-media

@@ -33,6 +33,7 @@ It **never touches GitHub** — manifests are committed deliberately by a Sophia
 
 ## CLI
 - `farm-media-queue list [--farm <id>]` — uploaded / pending / needs_metadata / error.
+- `farm-media-publisher [--collection <id>] [--dry-run]` — reconcile inbox media → `galleries/<collection>.json` in `farm_media_manifests` (idempotent: writes only when the bytes changed). This is the timer's job; `--dry-run`/`--outdir` keep it off the network.
 - `farm-media-manifest commit <farm_id>` — commit step.
 - `farm_media_archive.py --once` — run one archive pass (S3 worker) for testing.
 - `farm-media-captions enrich` — transcribe+translate inbox videos to English (writes `.vtt` + sets description in sidecar; reverse-geocodes GPS into the description when a Maps key is present).
@@ -42,6 +43,16 @@ It **never touches GitHub** — manifests are committed deliberately by a Sophia
 ## Systemd
 - `systemd/farm-media-daemon.service` — YouTube worker.
 - `systemd/farm-media-archive.service` — S3 archive worker (sources `/opt/truesight_autopilot/.env` for AWS creds).
+- `systemd/farm-media-publisher.service` + `.timer` — gallery reconcile, every 15 min (idempotent; derives `galleries/<collection>.json` and writes it via the Contents API). Never rewrites `<farm_id>.json`.
+
+## How galleries publish (publisher)
+The web gallery `farms/<slug>/media.json` used to be the ONE hand-authored link in MAP, so it
+lagged the daemon (33 uploaded Cacau na Veia clips, page still photos-only). The
+`farm-media-publisher` closes that gap: on a systemd timer it reads each collection and writes
+`galleries/<collection>.json` into the machine-owned `farm_media_manifests` repo via the
+Contents API. It is **idempotent** (unchanged input → no commit) and reads the committed
+manifest when present (else the inbox sidecars), so it can never clobber the hand-verified
+`<farm_id>.json` metadata. The site fetches that JSON (PR6), with `./media.json` as fallback.
 
 ## Credentials
 NEVER commit `config/youtube/*.json` or AWS keys — they live only on the box (gitignored / `.env`). The repo is public by design.
