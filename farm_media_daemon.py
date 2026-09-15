@@ -77,6 +77,24 @@ def sleep_until_quota_reset() -> None:
     time.sleep(min(wait, 3600.0))
 
 
+def is_quota_error(tail: str) -> bool:
+    """True when an uploader failure means quota is exhausted (back off), not a
+    transient/generic error (retry after 60s).
+
+    YouTube reports a rolling-window cap as ``uploadLimitExceeded`` — "The user
+    has exceeded the number of videos they may upload" — rather than a plain 429,
+    so we match that string too; otherwise the daemon hot-loops every 60s.
+    """
+    low = (tail or "").lower()
+    return (
+        "quota" in low
+        or "429" in low
+        or "ratelimitexceeded" in low
+        or "uploadlimitexceeded" in low
+        or "exceeded the number of videos" in low
+    )
+
+
 def upload_one(
     upload_cmd: list[str], mp4: str, sidecar: dict
 ) -> tuple[str | None, str]:
@@ -179,8 +197,7 @@ def run(cfg: dict, upload_cmd: list[str], logpath: str, once: bool = False) -> N
                     made_progress = True
                     quota_backoff_s = QUOTA_BACKOFF_START_S  # reset on success
                 else:
-                    low = tail.lower()
-                    if "quota" in low or "429" in low or "ratelimitexceeded" in low:
+                    if is_quota_error(tail):
                         LOG.warning(
                             "%s quota exhausted; pause %.0fs then retry: %s",
                             sidecar["file"],
