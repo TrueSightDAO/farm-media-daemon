@@ -193,3 +193,82 @@ def test_main_parity_gate_returns_2(tmp_path, monkeypatch):
         ]
     )
     assert rc == 2
+
+
+# --- nearest-location join ------------------------------------------------
+
+
+def _loc_index():
+    import farm_media_locations as loc
+
+    plots = {
+        "features": [
+            {
+                "geometry": {
+                    "type": "Polygon",
+                    "coordinates": [
+                        [
+                            [-52.5832, -3.2963],
+                            [-52.5827, -3.2963],
+                            [-52.5827, -3.2957],
+                            [-52.5832, -3.2957],
+                            [-52.5832, -3.2963],
+                        ]
+                    ],
+                },
+                "properties": {"plot_id": "RM-P1", "farm_id": "rancho-maranta"},
+            }
+        ]
+    }
+    return loc.LocationIndex.from_geojson(plots, None)
+
+
+def _seed_gps_inbox(d):
+    os.makedirs(os.path.join(d, "farm-x"), exist_ok=True)
+    _seed_inbox(
+        os.path.join(d, "farm-x"),
+        [
+            ("A.MOV", {"file": "A.MOV", "gps": "-3.2960, -52.5830"}),  # on-plot
+            ("B.MOV", {"file": "B.MOV", "gps": "-3.6300, -53.6500"}),  # far
+            ("C.HEIC", {"file": "C.HEIC"}),  # no gps
+        ],
+    )
+
+
+def test_build_manifest_auto_joins_nearest_location():
+    import tempfile
+
+    d = tempfile.mkdtemp()
+    _seed_gps_inbox(d)
+    man = m.build_manifest("farm-x", d, locations=_loc_index())
+    a = next(i for i in man["items"] if i["file"] == "A.MOV")
+    b = next(i for i in man["items"] if i["file"] == "B.MOV")
+    c = next(i for i in man["items"] if i["file"] == "C.HEIC")
+    assert a["nearest_location_id"] == "RM-P1" and a["nearest_location_ok"] is True
+    assert b["nearest_location_ok"] is False  # the far/unmatched signal
+    assert "nearest_location_id" not in c  # no GPS -> no join
+    assert (
+        man["nearest_location_coverage"]
+        == "1/2 GPS items within 2 km of a known location"
+    )
+
+
+def test_build_manifest_skips_join_when_locations_none():
+    import tempfile
+
+    d = tempfile.mkdtemp()
+    _seed_gps_inbox(d)
+    man = m.build_manifest("farm-x", d, locations=None)
+    assert all("nearest_location_id" not in i for i in man["items"])
+    assert "nearest_location_coverage" not in man
+
+    # explicit LocationIndex must NOT be clobbered by the lazy-load default
+
+
+def test_build_manifest_explicit_index_wins():
+    import tempfile
+
+    d = tempfile.mkdtemp()
+    _seed_gps_inbox(d)
+    man = m.build_manifest("farm-x", d, locations=_loc_index())
+    assert man["items"][0]["nearest_location_id"] in {"RM-P1"}
