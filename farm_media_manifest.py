@@ -19,6 +19,27 @@ import os
 import sys
 from collections import Counter
 
+# Sentinel: build_manifest(..., locations=<default>) resolves to the cached
+# location index lazily; pass an explicit LocationIndex (or None) to override.
+_AUTO = object()
+
+
+def _default_locations():
+    """Best-effort load of the cached nearest-location index (never raises)."""
+    try:
+        from farm_media_locations import load_default_index
+
+        return load_default_index()
+    except Exception:
+        return None
+
+
+def _nearest_coverage(items):
+    """'<within>/<gps>' summary of GPS items matched to a known location."""
+    gps = [i for i in items if i.get("nearest_distance_m") is not None]
+    within = sum(1 for i in gps if i.get("nearest_location_ok"))
+    return f"{within}/{len(gps)} GPS items within 2 km of a known location"
+
 
 def _parse_gps(gps):
     """Parse a sidecar gps value into (lat, lon, raw).
@@ -55,7 +76,7 @@ GALLERY_SUBDIR = "galleries"
 MEDIA_EXTS = {".mov", ".mp4", ".m4v", ".heic", ".heif", ".jpg", ".jpeg", ".png"}
 
 
-def build_manifest(farm_id, inbox_dir, today=None, with_paths=False):
+def build_manifest(farm_id, inbox_dir, today=None, with_paths=False, locations=_AUTO):
     """Aggregate media+sidecar pairs for ``farm_id`` into a manifest dict.
 
     Pure (no writes). The sidecar is the single source of truth for an item's
@@ -63,7 +84,14 @@ def build_manifest(farm_id, inbox_dir, today=None, with_paths=False):
     manifest that predates an upload gets its ``yt_id`` backfilled. ``with_paths``
     attaches a private ``_path`` per item (ffprobe aspect probe); stripped by
     :func:`strip_private` before serialisation.
+
+    ``locations`` is an optional :class:`farm_media_locations.LocationIndex`;
+    when present, every GPS-bearing item is annotated with its nearest known
+    plot/tree (see :mod:`farm_media_locations`). Omitted -> the cached index is
+    loaded lazily; pass ``None`` to skip the join entirely.
     """
+    if locations is _AUTO:
+        locations = _default_locations()
     path = os.path.join(inbox_dir, farm_id)
     if not os.path.isdir(path):
         raise FileNotFoundError(f"no inbox for {farm_id}: {path}")
@@ -117,9 +145,13 @@ def build_manifest(farm_id, inbox_dir, today=None, with_paths=False):
         }
         if with_paths:
             entry["_path"] = full
+        if locations is not None and lat is not None and lon is not None:
+            near = locations.nearest(lat, lon)
+            if near:
+                entry.update(near)
         items.append(entry)
 
-    return {
+    manifest = {
         "farm_id": farm_id,
         "plots": [],
         "source_zips": [],
@@ -129,6 +161,9 @@ def build_manifest(farm_id, inbox_dir, today=None, with_paths=False):
         "gps_coverage": f"{gps_count}/{len(items)} files with GPS",
         "items": items,
     }
+    if locations is not None:
+        manifest["nearest_location_coverage"] = _nearest_coverage(items)
+    return manifest
 
 
 def strip_private(manifest):
@@ -198,11 +233,41 @@ def main(argv=None) -> int:
     ap.add_argument(
         "--skip-parity", action="store_true", help="do not run the parity check"
     )
+    ap.add_argument(
+        "--no-locations",
+        action="store_true",
+        help="skip the nearest-location join",
+    )
+    ap.add_argument(
+        "--locations-cache",
+        default=None,
+        help="override the locations cache path",
+    )
+    ap.add_argument(
+        "--refresh-locations",
+        action="store_true",
+        help="refresh the locations cache from the live geojson before building",
+    )
     args = ap.parse_args(argv)
+
+    locations = None
+    if not args.no_locations:
+        try:
+            import farm_media_locations as loc
+
+            cache = args.locations_cache or loc.DEFAULT_CACHE
+            if args.refresh_locations:
+                loc.refresh(cache)
+            locations = loc.load_default_index(cache)
+        except Exception:
+            locations = None
 
     try:
         manifest = build_manifest(
-            args.farm_id, args.inbox, with_paths=args.with_gallery
+            args.farm_id,
+            args.inbox,
+            with_paths=args.with_gallery,
+            locations=locations,
         )
     except FileNotFoundError as exc:
         print(str(exc), file=sys.stderr)
