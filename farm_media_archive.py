@@ -411,6 +411,7 @@ def process_zip_dir(
     exts: tuple,
     frac: float,
     settle_seconds: int = 0,
+    zip_farm_ids: dict | None = None,
 ) -> bool:
     """Archive every settled zip in ``zip_dir``; move finished ones on.
 
@@ -418,6 +419,9 @@ def process_zip_dir(
     ``/media/processing`` must NOT stay there once MAP is done with it -- it
     belongs in ``/media/processed``. This is where that promotion happens,
     because only the archive worker knows the zip is complete.
+
+    ``zip_farm_ids`` maps zip filename -> farm_id for a dir shared by several
+    farms/namespaces; unmapped zips are skipped (never mis-filed).
     """
     if not os.path.isdir(zip_dir):
         return False
@@ -428,6 +432,7 @@ def process_zip_dir(
             zip_dir,
         )
         return False
+    per_zip = dict(zip_farm_ids or {})
     made = False
     now = time.time()
     for name in sorted(os.listdir(zip_dir)):
@@ -436,26 +441,41 @@ def process_zip_dir(
         zip_path = os.path.join(zip_dir, name)
         if not os.path.isfile(zip_path):
             continue
+        # Per-zip attribution: one intake dir can hold zips from several farms or
+        # namespaces, so map each zip to its own farm_id. When the root lists an
+        # explicit map, an unmapped zip is SKIPPED -- never mis-filed under a
+        # wrong raw/<farm_id>/ prefix.
+        if per_zip:
+            zid = per_zip.get(name)
+            if not zid:
+                LOG.warning(
+                    "no zip_farm_ids entry for %s -> skipped; add it to the "
+                    "root's zip_farm_ids to archive this zip",
+                    name,
+                )
+                continue
+        else:
+            zid = farm_id
         if now - os.path.getmtime(zip_path) < settle_seconds:
             LOG.info("skip %s: still settling (< %ds)", name, settle_seconds)
             continue
         try:
-            if handle_zip_root(s3, bucket, farm_id, zip_path, exts, frac):
+            if handle_zip_root(s3, bucket, zid, zip_path, exts, frac):
                 made = True
         except Exception as exc:  # noqa: BLE001 - keep the loop alive
-            LOG.error("%s zip %s failed: %s", farm_id, zip_path, exc)
+            LOG.error("%s zip %s failed: %s", zid, zip_path, exc)
             time.sleep(BACKOFF_ERROR_S)
             continue
         if zip_is_complete(zip_path, exts):
             try:
                 dst = promote_zip(zip_path, processed_dir)
-                LOG.info("%s: COMPLETE -> moved %s to %s", farm_id, name, dst)
+                LOG.info("%s: COMPLETE -> moved %s to %s", zid, name, dst)
             except (OSError, FileExistsError) as exc:
-                LOG.error("%s: could not promote %s: %s", farm_id, name, exc)
+                LOG.error("%s: could not promote %s: %s", zid, name, exc)
             made = True
         else:
             LOG.info(
-                "%s: %s still has pending entries; left in %s", farm_id, name, zip_dir
+                "%s: %s still has pending entries; left in %s", zid, name, zip_dir
             )
     return made
 
@@ -472,6 +492,7 @@ def run(cfg: dict, once: bool = False) -> None:
     # Resolve each root ONCE (startup) so the photo/video split is logged once, not
     # every idle loop -- and so no still photo can ever reach S3.
     plan = []
+    zip_dir_maps: dict = {}
     for root in roots:
         farm_id = root.get("farm_id", "?")
         video_exts, photo_exts = resolve_extensions(root, farm_id)
@@ -498,6 +519,8 @@ def run(cfg: dict, once: bool = False) -> None:
                 int(root.get("settle_seconds", 0)),
             )
         )
+        if root.get("zip_dir"):
+            zip_dir_maps[root["zip_dir"]] = root.get("zip_farm_ids") or {}
     while True:
         made = False
         for farm_id, exts, zip_path, path, zip_dir, processed_dir, settle in plan:
@@ -512,6 +535,7 @@ def run(cfg: dict, once: bool = False) -> None:
                         exts,
                         frac,
                         settle,
+                        zip_dir_maps.get(zip_dir, {}),
                     ):
                         made = True
                 except Exception as exc:  # noqa: BLE001 - keep the loop alive

@@ -32,12 +32,24 @@ archive:
     # intake flow). Every settled *.zip is archived entry-by-entry; once ALL its
     # media entries are in S3 (recorded in <zip>.archive.json) the zip AND that
     # sidecar are moved into processed_dir. Finished zips never linger in zip_dir.
-    # - farm_id: itacare-pituba
-    #   zip_dir: /media/processing
-    #   processed_dir: /media/processed
-    #   settle_seconds: 60
-    #   extensions:
-    #     - .MOV
+    #
+    # When ONE dir holds zips from SEVERAL farms/namespaces, list `zip_farm_ids`
+    # (zip filename -> farm_id) so each zip is filed under its own raw/<farm_id>/.
+    # A zip ABSENT from the map is skipped (never mis-filed) — add it to archive it.
+    - farm_id: intake
+      zip_dir: /media/processing
+      processed_dir: /media/processed
+      settle_seconds: 60
+      extensions:
+        - .MOV
+        - .mov
+        - .mp4
+      zip_farm_ids:
+        santa_anna_fazenda_bahia_complete.zip: fazenda-santa-ana-bahia
+        sao_jorge_fazenda_complete.zip: fazenda-sao-jorge-bahia
+        vivi_fazenda_2025.zip: vivi-jesus-do-deus-itacare
+        itacare_pituba_samba_festival_2024.zip: event-media
+        tribo_mirim_roda_2024.zip: event-media
 
     # FORM 1 — extracted directory of originals:
     - farm_id: cleide
