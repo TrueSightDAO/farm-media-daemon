@@ -40,9 +40,13 @@ archive:
     # captured_at + preview frame, uploaded to raw/<farm>/ + previews/<farm>/,
     # then a durable state file <zip>.archive.json is written (resume-safe).
     # __MACOSX/ and ._ AppleDouble junk entries are skipped automatically.
+    # `extensions` is VIDEO ONLY. Still photos (HEIC/JPG) must NEVER be listed
+    # here or on any root: "No S3 for still photos" (MEDIA_ARCHIVE_PIPELINE.md) --
+    # stills belong in the GitHub repo farm-media-raw/<farm>/photos/. A root with
+    # no `extensions` key defaults to video-only .MOV/.mov and logs a loud warning.
     - farm_id: cacao-variety-parap
       zip: /home/ubuntu/cacao_variety_parap.zip
-      extensions: [.MOV, .mov, .mp4, .HEIC, .heic, .JPG, .jpg]
+      extensions: [.MOV, .mov, .mp4]
 
 # Sleep window: uploads pause 07:00-07:05 UTC for quota reset (configurable)
 quota_reset_utc: "07:05"

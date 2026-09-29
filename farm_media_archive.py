@@ -39,6 +39,9 @@ LOG = logging.getLogger("farm_media_archive")
 S3_ENDPOINT = "https://s3.us-east-1.amazonaws.com"
 EXTOOLS = ("MediaCreateDate", "CreateDate", "CreationDate", "DateTimeOriginal")
 DEFAULT_EXTENSIONS = (".MOV", ".mov")
+# Still photos must NEVER be archived to S3 (MEDIA_ARCHIVE_PIPELINE.md rule:
+# "No S3 for still photos") -- they live in the GitHub repo farm-media-raw.
+# Lowercase tuple; matched case-insensitively against config extensions.
 _PHOTO_EXTS = (".heic", ".heif", ".jpg", ".jpeg", ".png")
 BACKOFF_ERROR_S = 60
 IDLE_S = 30
@@ -318,6 +321,31 @@ def s3_client(cfg: dict):
     return boto3.client("s3", region_name=region)  # instance/chain creds
 
 
+def resolve_extensions(root: dict, farm_id: str = "?") -> tuple:
+    """Split a root's extensions into (video_exts, photo_exts).
+
+    The S3 worker stores raw ORIGINALS, but per MEDIA_ARCHIVE_PIPELINE.md the rule
+    is "No S3 for still photos" -- stills belong in the GitHub repo farm-media-raw.
+    So any photo extension on a root is STRIPPED here and returned separately for
+    the caller to warn about; it is never streamed to S3. A root with no
+    `extensions` key logs a LOUD warning and falls back to DEFAULT_EXTENSIONS
+    (video-only) -- the old silent default mis-routed still photos with no signal.
+    """
+    raw = root.get("extensions")
+    if raw is None:
+        LOG.warning(
+            "root farm_id=%s has NO `extensions` key -> defaulting to video-only %s. "
+            "Set an explicit list; still photos must never be sent to S3.",
+            farm_id,
+            ",".join(DEFAULT_EXTENSIONS),
+        )
+        raw = list(DEFAULT_EXTENSIONS)
+    video, photo = [], []
+    for ext in raw:
+        (photo if str(ext).lower() in _PHOTO_EXTS else video).append(ext)
+    return tuple(video), tuple(photo)
+
+
 def run(cfg: dict, once: bool = False) -> None:
     arc = cfg.get("archive") or {}
     bucket = arc.get("bucket", "media.agroverse.shop")
@@ -327,12 +355,28 @@ def run(cfg: dict, once: bool = False) -> None:
         LOG.info("no archive.roots configured; idle")
         return
     s3 = s3_client(cfg)
+    # Resolve each root ONCE (startup) so the photo/video split is logged once, not
+    # every idle loop -- and so no still photo can ever reach S3.
+    plan = []
+    for root in roots:
+        farm_id = root.get("farm_id", "?")
+        video_exts, photo_exts = resolve_extensions(root, farm_id)
+        if photo_exts:
+            LOG.warning(
+                "%s: photo extensions %s are NOT archived to S3 (stills live in the "
+                "GitHub repo farm-media-raw); ignoring them here.",
+                farm_id,
+                ",".join(photo_exts),
+            )
+        if not video_exts:
+            LOG.error(
+                "%s: root has no VIDEO extensions -> nothing will be archived to S3.",
+                farm_id,
+            )
+        plan.append((farm_id, video_exts, root.get("zip"), root.get("path")))
     while True:
         made = False
-        for root in roots:
-            farm_id = root.get("farm_id", "?")
-            exts = tuple(root.get("extensions") or list(DEFAULT_EXTENSIONS))
-            zip_path = root.get("zip")
+        for farm_id, exts, zip_path, path in plan:
             if zip_path:
                 try:
                     if handle_zip_root(s3, bucket, farm_id, zip_path, exts, frac):
@@ -341,7 +385,7 @@ def run(cfg: dict, once: bool = False) -> None:
                     LOG.error("%s zip %s failed: %s", farm_id, zip_path, exc)
                     time.sleep(BACKOFF_ERROR_S)
                 continue
-            for src, marker in iter_raws(root.get("path", ""), exts):
+            for src, marker in iter_raws(path or "", exts):
                 try:
                     sc = archive_one(s3, bucket, farm_id, src, marker, frac)
                     LOG.info(
