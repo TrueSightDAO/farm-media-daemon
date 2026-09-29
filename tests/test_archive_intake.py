@@ -104,7 +104,9 @@ def test_process_zip_dir_settle_guard(tmp_path, monkeypatch):
     src.mkdir()
     _mkzip(src, "fresh.zip", [("clip.mov", b"1")])  # mtime = now
     called = []
-    monkeypatch.setattr(fma, "handle_zip_root", lambda *a, **k: called.append(1) or True)
+    monkeypatch.setattr(
+        fma, "handle_zip_root", lambda *a, **k: called.append(1) or True
+    )
     fma.process_zip_dir(
         None, "b", "f", str(src), str(tmp_path / "processed"), EXTS, 0.25, 300
     )
