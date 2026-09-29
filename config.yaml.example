@@ -28,6 +28,17 @@ archive:
   region: us-east-1
   preview_frame_frac: 0.25   # frame at 25% duration
   roots:
+    # FORM 3 — a DIRECTORY of zips (the /media/to_process -> processing -> processed
+    # intake flow). Every settled *.zip is archived entry-by-entry; once ALL its
+    # media entries are in S3 (recorded in <zip>.archive.json) the zip AND that
+    # sidecar are moved into processed_dir. Finished zips never linger in zip_dir.
+    # - farm_id: itacare-pituba
+    #   zip_dir: /media/processing
+    #   processed_dir: /media/processed
+    #   settle_seconds: 60
+    #   extensions:
+    #     - .MOV
+
     # FORM 1 — extracted directory of originals:
     - farm_id: cleide
       path: /home/ubuntu/cleide_media
