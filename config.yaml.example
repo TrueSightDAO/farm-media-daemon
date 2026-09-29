@@ -48,6 +48,17 @@ archive:
       zip: /home/ubuntu/cacao_variety_parap.zip
       extensions: [.MOV, .mov, .mp4]
 
+# Intake front door (farm_media_intake.py) -- claims dropped zips from
+# /media/to_process into /media/processing. Optional block; built-in defaults
+# apply if absent (/media/to_process, settle 300s, 20 GB headroom).
+intake:
+  to_process: /media/to_process
+  processing: /media/processing
+  duplicates: /media/duplicates
+  ledger: /opt/truesight_autopilot/farm_media_intake_ledger.json
+  settle_seconds: 300      # never claim a zip modified more recently than this
+  min_free_gb: 20          # refuse to claim if free space would drop below this
+
 # Sleep window: uploads pause 07:00-07:05 UTC for quota reset (configurable)
 quota_reset_utc: "07:05"
 
