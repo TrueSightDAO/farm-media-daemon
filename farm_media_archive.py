@@ -474,9 +474,7 @@ def process_zip_dir(
                 LOG.error("%s: could not promote %s: %s", zid, name, exc)
             made = True
         else:
-            LOG.info(
-                "%s: %s still has pending entries; left in %s", zid, name, zip_dir
-            )
+            LOG.info("%s: %s still has pending entries; left in %s", zid, name, zip_dir)
     return made
 
 
