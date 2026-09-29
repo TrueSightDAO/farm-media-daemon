@@ -127,3 +127,58 @@ def test_process_zip_dir_missing_dir_is_noop(tmp_path):
         )
         is False
     )
+
+
+def test_process_zip_dir_uses_per_zip_farm_id(tmp_path, monkeypatch):
+    """A shared intake dir maps each zip to its OWN farm_id/namespace."""
+    src = tmp_path / "processing"
+    src.mkdir()
+    z = _mkzip(src, "sao_jorge.zip", [("clip.mov", b"1")])
+    os.utime(z, (0, 0))
+    seen = {}
+
+    def fake_handle(s3, bucket, farm_id, zip_path, exts, frac):
+        seen["farm_id"] = farm_id
+        _record(zip_path, ["clip.mov"])
+        return True
+
+    monkeypatch.setattr(fma, "handle_zip_root", fake_handle)
+    fma.process_zip_dir(
+        None,
+        "b",
+        "intake",
+        str(src),
+        str(tmp_path / "processed"),
+        EXTS,
+        0.25,
+        0,
+        {"sao_jorge.zip": "fazenda-sao-jorge-bahia"},
+    )
+    assert seen["farm_id"] == "fazenda-sao-jorge-bahia"
+    assert os.path.exists(tmp_path / "processed" / "sao_jorge.zip")
+
+
+def test_process_zip_dir_skips_unmapped_zip_when_map_given(tmp_path, monkeypatch):
+    """A zip absent from zip_farm_ids is NOT archived (never mis-filed)."""
+    src = tmp_path / "processing"
+    src.mkdir()
+    z = _mkzip(src, "mystery.zip", [("clip.mov", b"1")])
+    os.utime(z, (0, 0))
+    called = []
+    monkeypatch.setattr(
+        fma, "handle_zip_root", lambda *a, **k: called.append(1) or True
+    )
+    made = fma.process_zip_dir(
+        None,
+        "b",
+        "placeholder",
+        str(src),
+        str(tmp_path / "processed"),
+        EXTS,
+        0.25,
+        0,
+        {"other.zip": "some-farm"},
+    )
+    assert called == []  # never archived
+    assert os.path.exists(z)  # left in place for a human to map
+    assert made is False
