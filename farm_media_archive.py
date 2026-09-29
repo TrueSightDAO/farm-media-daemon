@@ -346,6 +346,120 @@ def resolve_extensions(root: dict, farm_id: str = "?") -> tuple:
     return tuple(video), tuple(photo)
 
 
+def zip_media_entries(zip_path: str, extensions: tuple) -> list:
+    """Basenames of MEDIA entries in a zip (junk skipped); [] if unreadable."""
+    try:
+        with zipfile.ZipFile(zip_path) as zf:
+            infos = zf.infolist()
+    except (zipfile.BadZipFile, OSError):
+        return []
+    out = []
+    for info in infos:
+        bn = os.path.basename(info.filename)
+        if _is_junk_entry(info.filename) or not bn.lower().endswith(extensions):
+            continue
+        out.append(bn)
+    return out
+
+
+def zip_is_complete(zip_path: str, extensions: tuple) -> bool:
+    """True once EVERY media entry of the zip is recorded in its sidecar.
+
+    False for a zip with no media entries (nothing archived yet -- it may still
+    be being written), and for an unreadable/partial zip.
+    """
+    media = zip_media_entries(zip_path, extensions)
+    if not media:
+        return False
+    state, _ = load_zip_state(zip_path)
+    done = set(state.get("entries") or {})
+    return all(bn in done for bn in media)
+
+
+def promote_zip(zip_path: str, processed_dir: str) -> str:
+    """Atomically move a FINISHED zip AND its sidecar into ``processed_dir``.
+
+    Never deletes, never overwrites; the ``.archive.json`` sidecar travels with
+    the zip so provenance survives. ``os.rename`` is atomic only within one
+    filesystem, so a cross-fs move is refused rather than half-copied.
+    """
+    os.makedirs(processed_dir, exist_ok=True)
+    moved = []
+    for src in (zip_path, zip_path + ".archive.json"):
+        if not os.path.exists(src):
+            continue
+        dst = os.path.join(processed_dir, os.path.basename(src))
+        if os.path.exists(dst):
+            raise FileExistsError("refusing to overwrite {}".format(dst))
+        if os.stat(os.path.dirname(src)).st_dev != os.stat(processed_dir).st_dev:
+            raise OSError(
+                "{} and {} are on different filesystems; refusing to move {}".format(
+                    os.path.dirname(src), processed_dir, os.path.basename(src)
+                )
+            )
+        os.rename(src, dst)
+        moved.append(dst)
+    return moved[0] if moved else ""
+
+
+def process_zip_dir(
+    s3,
+    bucket: str,
+    farm_id: str,
+    zip_dir: str,
+    processed_dir: str,
+    exts: tuple,
+    frac: float,
+    settle_seconds: int = 0,
+) -> bool:
+    """Archive every settled zip in ``zip_dir``; move finished ones on.
+
+    The intake contract (Gary, thread 30550): a zip the front door claimed into
+    ``/media/processing`` must NOT stay there once MAP is done with it -- it
+    belongs in ``/media/processed``. This is where that promotion happens,
+    because only the archive worker knows the zip is complete.
+    """
+    if not os.path.isdir(zip_dir):
+        return False
+    if not processed_dir:
+        LOG.error(
+            "%s: zip_dir %s has no processed_dir; zips will not be promoted",
+            farm_id,
+            zip_dir,
+        )
+        return False
+    made = False
+    now = time.time()
+    for name in sorted(os.listdir(zip_dir)):
+        if not name.lower().endswith(".zip"):
+            continue
+        zip_path = os.path.join(zip_dir, name)
+        if not os.path.isfile(zip_path):
+            continue
+        if now - os.path.getmtime(zip_path) < settle_seconds:
+            LOG.info("skip %s: still settling (< %ds)", name, settle_seconds)
+            continue
+        try:
+            if handle_zip_root(s3, bucket, farm_id, zip_path, exts, frac):
+                made = True
+        except Exception as exc:  # noqa: BLE001 - keep the loop alive
+            LOG.error("%s zip %s failed: %s", farm_id, zip_path, exc)
+            time.sleep(BACKOFF_ERROR_S)
+            continue
+        if zip_is_complete(zip_path, exts):
+            try:
+                dst = promote_zip(zip_path, processed_dir)
+                LOG.info("%s: COMPLETE -> moved %s to %s", farm_id, name, dst)
+            except (OSError, FileExistsError) as exc:
+                LOG.error("%s: could not promote %s: %s", farm_id, name, exc)
+            made = True
+        else:
+            LOG.info(
+                "%s: %s still has pending entries; left in %s", farm_id, name, zip_dir
+            )
+    return made
+
+
 def run(cfg: dict, once: bool = False) -> None:
     arc = cfg.get("archive") or {}
     bucket = arc.get("bucket", "media.agroverse.shop")
@@ -373,10 +487,37 @@ def run(cfg: dict, once: bool = False) -> None:
                 "%s: root has no VIDEO extensions -> nothing will be archived to S3.",
                 farm_id,
             )
-        plan.append((farm_id, video_exts, root.get("zip"), root.get("path")))
+        plan.append(
+            (
+                farm_id,
+                video_exts,
+                root.get("zip"),
+                root.get("path"),
+                root.get("zip_dir"),
+                root.get("processed_dir"),
+                int(root.get("settle_seconds", 0)),
+            )
+        )
     while True:
         made = False
-        for farm_id, exts, zip_path, path in plan:
+        for farm_id, exts, zip_path, path, zip_dir, processed_dir, settle in plan:
+            if zip_dir:
+                try:
+                    if process_zip_dir(
+                        s3,
+                        bucket,
+                        farm_id,
+                        zip_dir,
+                        processed_dir or "",
+                        exts,
+                        frac,
+                        settle,
+                    ):
+                        made = True
+                except Exception as exc:  # noqa: BLE001 - keep the loop alive
+                    LOG.error("%s intake dir %s failed: %s", farm_id, zip_dir, exc)
+                    time.sleep(BACKOFF_ERROR_S)
+                continue
             if zip_path:
                 try:
                     if handle_zip_root(s3, bucket, farm_id, zip_path, exts, frac):
