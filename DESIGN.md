@@ -9,13 +9,17 @@ Every farm's media (photos + videos) needs to reach YouTube, the raw S3 archive,
 ## 2. Principles (governor-approved)
 
 1. **Metadata travels with the file.** A `<file>.json` sidecar sits next to each video carrying everything the upstream pipeline already computed (sha256, GPS, objects, duration, title, description, farm_id, provenance). The daemon never regenerates, looks up, or infers.
-2. **The queue IS the inbox.** `media_archive_inbox/<source>/<farm_id>/` — pending = no `yt_id`, done = `yt_id` present, failed = `error` field. Source namespaces match MAP terminology (farm-media = first, event-media future).
-3. **The daemon never touches GitHub.** It only reads sidecars, uploads, writes state back into sidecars/markers, and moves on.
-4. **GitHub is the committed state.** `farm_media_manifests/<farm>.json` + `index.json` in the dedicated repo TrueSightDAO/farm_media_manifests are the durable record any Sophia reads. Committing is a deliberate step (Sophia or `manifest-commit` CLI) — never automatic per-video.
-5. **Any Sophia can read/commit.** The manifests are the index; querying is just reading them. Midstream handoff between Sophias works from any thread.
-6. **The governor can query any Sophia.** "Find me cacao-processing videos from Cleide" — answered from manifests, across photos + videos.
-7. **Provenance in every sidecar.** `produced_by`, `generated` timestamps — so stale/wrong metadata is attributable.
-8. **Capture time, raw blob, and preview are first-class.** `captured_at` (ISO-8601, harvested from the original MOV/HEIC at intake — ffmpeg drops it, so capture it BEFORE transcode), `raw_url` (stable pointer to the raw original in S3), and `preview` (frame JPG, hot in S3). The manifest is the full index: what / where / when / preview.
+2. **Zip provenance on every item.** If media arrived inside a zip, the
+   zip filename (`source_zip`) is stamped onto each item's sidecar so any single
+   file traces back to its origin archive — future retrieval by name, not just by
+   path. The manifest's top-level `source_zips` is *derived* from the items.
+3. **The queue IS the inbox.** `media_archive_inbox/<source>/<farm_id>/` — pending = no `yt_id`, done = `yt_id` present, failed = `error` field. Source namespaces match MAP terminology (farm-media = first, event-media future).
+4. **The daemon never touches GitHub.** It only reads sidecars, uploads, writes state back into sidecars/markers, and moves on.
+5. **GitHub is the committed state.** `farm_media_manifests/<farm>.json` + `index.json` in the dedicated repo TrueSightDAO/farm_media_manifests are the durable record any Sophia reads. Committing is a deliberate step (Sophia or `manifest-commit` CLI) — never automatic per-video.
+6. **Any Sophia can read/commit.** The manifests are the index; querying is just reading them. Midstream handoff between Sophias works from any thread.
+7. **The governor can query any Sophia.** "Find me cacao-processing videos from Cleide" — answered from manifests, across photos + videos.
+8. **Provenance in every sidecar.** `produced_by`, `generated` timestamps — so stale/wrong metadata is attributable.
+9. **Capture time, raw blob, and preview are first-class.** `captured_at` (ISO-8601, harvested from the original MOV/HEIC at intake — ffmpeg drops it, so capture it BEFORE transcode), `raw_url` (stable pointer to the raw original in S3), and `preview` (frame JPG, hot in S3). The manifest is the full index: what / where / when / preview.
 
 ## 3. Layout
 
@@ -55,6 +59,7 @@ media_archive_inbox/<source>/<farm_id>/        # YouTube worker queue
   "tags": ["cacao", "agroverse", "para"],
   "privacy": "public",
   "produced_by": "sophia",
+  "source_zip": "founder_haus_startup_summit_20260930.zip",
   "generated": "2026-09-01T00:00:00Z",
   "yt_id": null,
   "error": null
@@ -73,6 +78,7 @@ media_archive_inbox/<source>/<farm_id>/        # YouTube worker queue
   "duration_s": 34.2,
   "raw_url": "https://s3.us-east-1.amazonaws.com/media.agroverse.shop/raw/cleide/IMG_4859.MOV",
   "preview_url": "https://s3.us-east-1.amazonaws.com/media.agroverse.shop/previews/cleide/IMG_4859.jpg",
+  "source_zip": "founder_haus_startup_summit_20260930.zip",
   "produced_by": "farm-media-archive",
   "uploaded_at": "2026-09-05T00:00:00Z"
 }
