@@ -57,6 +57,11 @@ DEFAULT_LEDGER = "/opt/truesight_autopilot/farm_media_intake_ledger.json"
 DEFAULT_SETTLE_S = 300
 DEFAULT_MIN_FREE_GB = 20.0
 ZIP_SUFFIX = ".zip"
+# Per-zip identity card: `foo.zip` + sibling `foo.zip.context.json` (thread 30550
+# §4.1). The card is the ONLY safe source of `farm_id` for a dropped zip whose
+# farm can't be derived -- the front door ferries it and never guesses. It is
+# inert to the claimer (we enumerate *.zip only) but travels to_process -> processing.
+CONTEXT_SUFFIX = ".zip.context.json"
 
 # 2 == disk guard tripped (loud, so systemd surfaces it)
 EXIT_REFUSED = 2
@@ -98,6 +103,57 @@ def settled_candidates(to_process: str, settle_seconds: int, now: float) -> list
             )
             continue
         out.append(path)
+    return out
+
+
+def context_card_path(zip_path: str) -> str:
+    """Sibling identity card for ``foo.zip`` -> ``foo.zip.context.json``."""
+    return zip_path + ".context.json"
+
+
+def read_context_card(zip_path: str):
+    """Parse the sibling context card, or ``None`` when there is no card.
+
+    A card that EXISTS but is malformed RAISES: we refuse to treat a broken card
+    as "no card" (that would silently re-hide a zip the governor meant to give
+    context for). Absent card -> legitimate ``None``.
+    """
+    path = context_card_path(zip_path)
+    if not os.path.exists(path):
+        return None
+    with open(path, encoding="utf-8") as fh:
+        card = json.load(fh)
+    if not isinstance(card, dict):
+        raise TypeError(f"context card {path} must be a JSON object")
+    return card
+
+
+def _configured_zip_farm_ids(cfg: dict) -> set:
+    """Every zip name the archive config already maps to a farm_id."""
+    ids = set()
+    for root in (cfg.get("archive") or {}).get("roots") or []:
+        for k in root.get("zip_farm_ids") or {}:
+            ids.add(k)
+        if root.get("zip"):
+            ids.add(os.path.basename(root["zip"]))
+    return ids
+
+
+def awaiting_context_zips(processing: str, cfg: dict) -> list:
+    """Settled zips in ``processing/`` with NO context card AND not in any
+    ``zip_farm_ids`` -- i.e. zips the back door will hold. The self-asking digest."""
+    if not os.path.isdir(processing):
+        return []
+    mapped = _configured_zip_farm_ids(cfg)
+    out = []
+    for name in sorted(os.listdir(processing)):
+        if name.startswith(".") or not name.lower().endswith(ZIP_SUFFIX):
+            continue
+        if name in mapped:
+            continue
+        if os.path.exists(os.path.join(processing, name + ".context.json")):
+            continue
+        out.append(name)
     return out
 
 
@@ -177,7 +233,7 @@ def run_intake(
 
     ledger = load_ledger(ledger_path)
     claimed = ledger["claimed"]
-    result = {"claimed": [], "duplicate": [], "refused": None}
+    result = {"claimed": [], "duplicate": [], "refused": None, "awaiting_context": []}
 
     candidates = settled_candidates(to_process, settle, now)
     if not candidates:
@@ -190,6 +246,12 @@ def run_intake(
 
     for src in candidates:
         name = os.path.basename(src)
+        # Read the card BEFORE claiming: a broken card must never hide a zip.
+        try:
+            card = read_context_card(src)
+            card_error = None
+        except Exception as exc:  # noqa: BLE001 -- any card error must surface
+            card, card_error = None, str(exc)
         digest = sha256_of(src)
         if digest in claimed:
             LOG.warning(
@@ -215,11 +277,29 @@ def run_intake(
             result["refused"] = name
             break  # loud refusal; the rest waits for a future run
         dst = _move(src, processing, dry_run=dry_run)
-        claimed[digest] = {
+        # ferry the identity card with its zip (inert to the claimer until now)
+        card_src = context_card_path(src)
+        if os.path.exists(card_src):
+            _move(card_src, processing, dry_run=dry_run)
+        entry = {
             "path": name,
             "size": size,
             "claimed_at": dt.datetime.now(dt.timezone.utc).isoformat(),
         }
+        if card_error:
+            entry["awaiting_context"] = True
+            entry["context_error"] = card_error
+            result["awaiting_context"].append(f"{name} (bad card)")
+        elif card is None or not card.get("farm_id"):
+            entry["awaiting_context"] = True
+            result["awaiting_context"].append(name)
+        else:
+            entry["context"] = {
+                k: card[k]
+                for k in ("farm_id", "title", "event_date", "location")
+                if card.get(k) is not None
+            }
+        claimed[digest] = entry
         LOG.info(
             "%sclaimed %s -> %s (sha %s, %.2f GB)",
             "[dry-run] " if dry_run else "",
@@ -260,11 +340,24 @@ def main(argv=None) -> int:
         cfg = yaml.safe_load(fh) or {}
 
     res = run_intake(cfg, dry_run=args.dry_run)
+    processing = (cfg.get("intake") or {}).get("processing", DEFAULT_PROCESSING)
+    awaiting = sorted(
+        set(res.get("awaiting_context") or [])
+        | set(awaiting_context_zips(processing, cfg))
+    )
+    if awaiting:
+        LOG.warning(
+            "AWAITING CONTEXT: %d zip(s) held (no known farm_id): %s -- drop a "
+            "<zip>.context.json beside it, or add a zip_farm_ids entry",
+            len(awaiting),
+            ", ".join(awaiting),
+        )
     LOG.info(
-        "intake: claimed=%d duplicate=%d refused=%s",
+        "intake: claimed=%d duplicate=%d refused=%s awaiting_context=%d",
         len(res["claimed"]),
         len(res["duplicate"]),
         res["refused"],
+        len(awaiting),
     )
     return EXIT_REFUSED if res["refused"] else 0
 

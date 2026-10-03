@@ -67,3 +67,25 @@ Idempotent, dry-run by default:
 
     python3 farm_media_backfill_source_zip.py            # report only
     python3 farm_media_backfill_source_zip.py --apply    # write sidecars
+
+## Per-zip context card (`foo.zip.context.json`)
+
+A dropped zip can carry its identity alongside it as a sibling JSON card
+(`/media/to_process/foo.zip.context.json`), so its `farm_id` never has to be
+hand-typed into the config. The card is **inert to the claimer** (the front door
+enumerates `*.zip` only) but is **ferried with its zip** the whole funnel:
+`to_process/` -> `processing/` -> `processed/`.
+
+    {"farm_id": "fazenda-x", "title": "...", "event_date": "2026-01-21", "location": "..."}
+
+Resolution order in the archive worker: **(1)** the sibling card, else **(2)** the
+config's `zip_farm_ids` map, else **(3)** the root's own `farm_id`. A zip with a
+`zip_farm_ids` map in play but **no card and no entry** is **held** (fail-closed,
+never mis-filed), and `farm_media_intake.py` logs an `AWAITING CONTEXT` digest
+naming every held zip -- so a zip needing identity is **visible**, not stalled
+silently. A malformed card is treated as absent **and flagged** (never silently
+treated as "no card").
+
+    # front door logs, per pass:
+    AWAITING CONTEXT: 2 zip(s) held (no known farm_id): ilheus_warehouse.zip, ... \
+      -- drop a <zip>.context.json beside it, or add a zip_farm_ids entry
