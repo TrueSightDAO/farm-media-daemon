@@ -56,3 +56,14 @@ manifest when present (else the inbox sidecars), so it can never clobber the han
 
 ## Credentials
 NEVER commit `config/youtube/*.json` or AWS keys — they live only on the box (gitignored / `.env`). The repo is public by design.
+
+## Backfill: per-item `source_zip` provenance
+
+Media archived before the per-item `source_zip` change has no origin-zip field in
+its inbox sidecar. `farm_media_backfill_source_zip.py` joins each sidecar to the
+authoritative `<zip>.archive.json` in `/media/processed/` (keyed on `farm_id` +
+`sha256`, falling back to `farm_id` + basename stem) and stamps `source_zip` in.
+Idempotent, dry-run by default:
+
+    python3 farm_media_backfill_source_zip.py            # report only
+    python3 farm_media_backfill_source_zip.py --apply    # write sidecars
