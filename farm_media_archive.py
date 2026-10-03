@@ -34,6 +34,8 @@ import zipfile
 
 import yaml
 
+from farm_media_intake import context_card_path, read_context_card
+
 LOG = logging.getLogger("farm_media_archive")
 
 S3_ENDPOINT = "https://s3.us-east-1.amazonaws.com"
@@ -396,7 +398,7 @@ def promote_zip(zip_path: str, processed_dir: str) -> str:
     """
     os.makedirs(processed_dir, exist_ok=True)
     moved = []
-    for src in (zip_path, zip_path + ".archive.json"):
+    for src in (zip_path, zip_path + ".archive.json", context_card_path(zip_path)):
         if not os.path.exists(src):
             continue
         dst = os.path.join(processed_dir, os.path.basename(src))
@@ -452,16 +454,25 @@ def process_zip_dir(
         zip_path = os.path.join(zip_dir, name)
         if not os.path.isfile(zip_path):
             continue
-        # Per-zip attribution: one intake dir can hold zips from several farms or
-        # namespaces, so map each zip to its own farm_id. When the root lists an
-        # explicit map, an unmapped zip is SKIPPED -- never mis-filed under a
-        # wrong raw/<farm_id>/ prefix.
-        if per_zip:
+        # Per-zip identity, in order of trust: (1) the governor's sibling context
+        # card (authoritative, out-of-band-safe), else (2) the hand-edited
+        # zip_farm_ids map, else (3) the root's own farm_id. A zip with a map in
+        # play but NO entry and NO card is HELD (fail-closed, never mis-filed).
+        try:
+            card = read_context_card(zip_path)
+        except Exception as exc:  # noqa: BLE001 -- never mis-file on a bad card
+            LOG.error("%s: context card unreadable (%s) -> held", name, exc)
+            continue
+        zid = (card or {}).get("farm_id")
+        if zid:
+            LOG.info("%s: farm_id=%s (from context card)", name, zid)
+        elif per_zip:
             zid = per_zip.get(name)
             if not zid:
                 LOG.warning(
-                    "no zip_farm_ids entry for %s -> skipped; add it to the "
-                    "root's zip_farm_ids to archive this zip",
+                    "no context for %s -> held (awaiting context); drop a "
+                    "%s.context.json or add a zip_farm_ids entry",
+                    name,
                     name,
                 )
                 continue
