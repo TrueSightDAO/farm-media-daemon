@@ -171,6 +171,7 @@ def archive_one(
     preview_frame_frac: float,
     preview_dir: str | None = None,
     as_name: str | None = None,
+    source_zip: str | None = None,
 ) -> dict:
     basename = as_name or os.path.basename(src)
     stem, _ext = os.path.splitext(basename)
@@ -200,6 +201,7 @@ def archive_one(
         "raw_url": f"{S3_ENDPOINT}/{bucket}/{raw_key}",
         "preview_url": f"{S3_ENDPOINT}/{bucket}/{prev_key}" if ok else None,
         "preview": ok,
+        "source_zip": source_zip,
         "produced_by": "farm-media-archive",
         "uploaded_at": dt.datetime.now(dt.timezone.utc).isoformat(),
     }
@@ -287,6 +289,7 @@ def handle_zip_root(
                 state["entries"][bn] = {
                     "exists": True,
                     "raw_url": f"{S3_ENDPOINT}/{bucket}/{raw_key}",
+                    "source_zip": os.path.basename(zip_path),
                 }
                 write_sidecar(st_path, state)
                 made = True
@@ -296,7 +299,15 @@ def handle_zip_root(
         tmp = extract_zip_entry(zip_path, entry, tmpdir="/tmp")
         try:
             sc = archive_one(
-                s3, bucket, farm_id, tmp, None, frac, preview_dir="/tmp", as_name=bn
+                s3,
+                bucket,
+                farm_id,
+                tmp,
+                None,
+                frac,
+                preview_dir="/tmp",
+                as_name=bn,
+                source_zip=os.path.basename(zip_path),
             )
             state["entries"][bn] = sc
             write_sidecar(st_path, state)

@@ -272,3 +272,51 @@ def test_build_manifest_explicit_index_wins():
     _seed_gps_inbox(d)
     man = m.build_manifest("farm-x", d, locations=_loc_index())
     assert man["items"][0]["nearest_location_id"] in {"RM-P1"}
+
+
+# --- PR: per-item source_zip provenance (gov thread 30550) -----------------
+
+def test_build_manifest_surfaces_source_zip_per_item():
+    """Each item carries source_zip from its sidecar, and the manifest-level
+    source_zips is DERIVED from the items (was hardcoded [])."""
+    import tempfile
+
+    d = tempfile.mkdtemp()
+    os.makedirs(os.path.join(d, "farm-x"))
+    _seed_inbox(
+        os.path.join(d, "farm-x"),
+        [
+            ("A.MOV", {"file": "A.MOV", "source_zip": "founder_haus.zip"}),
+            ("B.MOV", {"file": "B.MOV", "source_zip": "founder_haus.zip"}),
+            ("C.MOV", {"file": "C.MOV"}),  # no provenance (plain root)
+        ],
+    )
+    man = m.build_manifest("farm-x", d)
+    by = {i["file"]: i for i in man["items"]}
+    assert by["A.MOV"]["source_zip"] == "founder_haus.zip"
+    assert by["C.MOV"]["source_zip"] is None
+    # manifest-level rollup is derived, sorted, deduped
+    assert man["source_zips"] == ["founder_haus.zip"]
+
+
+def test_archive_one_records_source_zip_in_sidecar(monkeypatch, tmp_path):
+    """archive_one stamps source_zip onto the sidecar it returns/writes."""
+    import farm_media_archive as a
+
+    monkeypatch.setattr(a, "sha256_of", lambda p: "deadbeef")
+    monkeypatch.setattr(a, "read_capture_time", lambda p: None)
+    monkeypatch.setattr(a, "probe_duration_s", lambda p: None)
+    monkeypatch.setattr(a, "make_preview", lambda *x, **k: False)
+
+    class _S3:
+        def upload_file(self, *x, **k):
+            pass
+
+    src = tmp_path / "IMG_1.MOV"
+    src.write_bytes(b"x")
+    sc = a.archive_one(_S3(), "bucket", "event-media", str(src), None, 0.1,
+                       source_zip="founder_haus.zip")
+    assert sc["source_zip"] == "founder_haus.zip"
+    # default is None when not supplied (plain-root behaviour unchanged)
+    sc2 = a.archive_one(_S3(), "bucket", "farm-x", str(src), None, 0.1)
+    assert sc2["source_zip"] is None

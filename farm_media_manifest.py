@@ -141,6 +141,7 @@ def build_manifest(farm_id, inbox_dir, today=None, with_paths=False, locations=_
             "place_id": side.get("place_id"),
             "yt_id": side.get("yt_id"),
             "uploaded_at": side.get("uploaded_at"),
+            "source_zip": side.get("source_zip"),
             "error": side.get("error"),
         }
         if with_paths:
@@ -151,10 +152,13 @@ def build_manifest(farm_id, inbox_dir, today=None, with_paths=False, locations=_
                 entry.update(near)
         items.append(entry)
 
+    source_zips = sorted(
+        {it["source_zip"] for it in items if it.get("source_zip")}
+    )
     manifest = {
         "farm_id": farm_id,
         "plots": [],
-        "source_zips": [],
+        "source_zips": source_zips,
         "generated": (today or datetime.date.today()).isoformat(),
         "processed_by": "MEDIA_ARCHIVE_PIPELINE.md",
         "counts": dict(exts),
