@@ -89,14 +89,51 @@ def test_dry_run_changes_nothing(tmp_path):
     assert not os.path.isdir(cfg["intake"]["processing"])
 
 
-def test_never_overwrites_existing_target(tmp_path):
+def test_same_name_same_sha_already_present_is_duplicate_not_crash(tmp_path):
+    """Regression (2026-10-04): a re-uploaded zip already sitting in processing/
+    must be recognised as a duplicate and set aside -- not crash the whole run."""
+    cfg = _cfg(tmp_path)
+    _mkzip(cfg["intake"]["to_process"], "ilheus.zip", b"same-bytes")
+    os.makedirs(cfg["intake"]["processing"], exist_ok=True)
+    with open(os.path.join(cfg["intake"]["processing"], "ilheus.zip"), "wb") as fh:
+        fh.write(b"same-bytes")
+    res = fma.run_intake(cfg, free_bytes_fn=lambda p: 100 * GB)
+    assert res["claimed"] == []
+    assert res["duplicate"] == ["ilheus.zip"]
+    assert os.path.exists(os.path.join(cfg["intake"]["duplicates"], "ilheus.zip"))
+    # the copy already in processing/ is left untouched
+    with open(os.path.join(cfg["intake"]["processing"], "ilheus.zip"), "rb") as fh:
+        assert fh.read() == b"same-bytes"
+
+
+def test_conflicting_name_different_bytes_set_aside_not_overwritten(tmp_path):
     cfg = _cfg(tmp_path)
     _mkzip(cfg["intake"]["to_process"], "clash.zip", b"new")
     os.makedirs(cfg["intake"]["processing"], exist_ok=True)
     with open(os.path.join(cfg["intake"]["processing"], "clash.zip"), "wb") as fh:
         fh.write(b"already here")
-    with pytest.raises(FileExistsError):
-        fma.run_intake(cfg, free_bytes_fn=lambda p: 100 * GB)
+    res = fma.run_intake(cfg, free_bytes_fn=lambda p: 100 * GB)
+    assert res["conflict"] == ["clash.zip"]
+    # never clobbered
+    with open(os.path.join(cfg["intake"]["processing"], "clash.zip"), "rb") as fh:
+        assert fh.read() == b"already here"
+    assert os.path.exists(os.path.join(cfg["intake"]["duplicates"], "clash.zip"))
+
+
+def test_present_duplicate_does_not_stall_later_zips(tmp_path):
+    """The exact 2026-10-04 incident: an already-present duplicate must not abort
+    the run and strand the zips queued behind it."""
+    cfg = _cfg(tmp_path)
+    _mkzip(cfg["intake"]["to_process"], "ilheus_warehouse.zip", b"dupe")
+    _mkzip(cfg["intake"]["to_process"], "la_do_sitio_trees.zip", b"fresh")
+    os.makedirs(cfg["intake"]["processing"], exist_ok=True)
+    with open(
+        os.path.join(cfg["intake"]["processing"], "ilheus_warehouse.zip"), "wb"
+    ) as fh:
+        fh.write(b"dupe")
+    res = fma.run_intake(cfg, free_bytes_fn=lambda p: 100 * GB)
+    assert "la_do_sitio_trees.zip" in res["claimed"]
+    assert res["duplicate"] == ["ilheus_warehouse.zip"]
 
 
 def test_cross_filesystem_move_is_refused(tmp_path, monkeypatch):
