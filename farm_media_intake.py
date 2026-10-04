@@ -202,6 +202,21 @@ def _move(src: str, dst_dir: str, *, dry_run: bool) -> str:
     return dst
 
 
+def _identical(a: str, b: str) -> bool:
+    """True when two paths hold byte-identical content (size + sha256).
+
+    Used to tell a benign re-upload of an already-claimed zip (same bytes) apart
+    from a genuine same-name clash (different bytes) *before* we touch
+    ``processing/``.
+    """
+    try:
+        if os.path.getsize(a) != os.path.getsize(b):
+            return False
+    except OSError:
+        return False
+    return sha256_of(a) == sha256_of(b)
+
+
 def _free_bytes(path: str) -> int:
     """Free bytes on the filesystem holding ``path``.
 
@@ -233,7 +248,13 @@ def run_intake(
 
     ledger = load_ledger(ledger_path)
     claimed = ledger["claimed"]
-    result = {"claimed": [], "duplicate": [], "refused": None, "awaiting_context": []}
+    result = {
+        "claimed": [],
+        "duplicate": [],
+        "conflict": [],
+        "refused": None,
+        "awaiting_context": [],
+    }
 
     candidates = settled_candidates(to_process, settle, now)
     if not candidates:
@@ -265,6 +286,45 @@ def run_intake(
             result["duplicate"].append(name)
             continue
         size = os.path.getsize(src)
+        dst = os.path.join(processing, name)
+        # A same-named file may already sit in ``processing/``: a re-upload of a
+        # zip we already claimed (the courier re-sends), or -- rarely -- a
+        # genuinely different file that happens to share a name. NEVER overwrite.
+        #   * same bytes  -> it IS that same zip -> duplicate, set aside, continue.
+        #   * diff bytes  -> set the new drop aside loudly; a human looks. Never
+        #                    clobber the claimed copy, never abort the run.
+        # Either way the zips queued BEHIND this one still get claimed.
+        if os.path.exists(dst):
+            if _identical(dst, src):
+                LOG.warning(
+                    "%s: already in %s (identical sha %s) -> %s",
+                    name,
+                    processing,
+                    digest[:12],
+                    duplicates,
+                )
+                _move(src, duplicates, dry_run=dry_run)
+                result["duplicate"].append(name)
+                claimed.setdefault(
+                    digest,
+                    {
+                        "path": name,
+                        "size": size,
+                        "claimed_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+                    },
+                )
+            else:
+                LOG.error(
+                    "CONFLICT: %s already in %s with DIFFERENT bytes (dropped "
+                    "sha %s) -- refusing to overwrite; set aside -> %s",
+                    name,
+                    processing,
+                    digest[:12],
+                    duplicates,
+                )
+                _move(src, duplicates, dry_run=dry_run)
+                result["conflict"].append(name)
+            continue
         need = size + int(min_free_gb * (1024**3))
         if free_fn(processing) < need:
             LOG.error(
@@ -353,9 +413,10 @@ def main(argv=None) -> int:
             ", ".join(awaiting),
         )
     LOG.info(
-        "intake: claimed=%d duplicate=%d refused=%s awaiting_context=%d",
+        "intake: claimed=%d duplicate=%d conflict=%d refused=%s awaiting_context=%d",
         len(res["claimed"]),
         len(res["duplicate"]),
+        len(res["conflict"]),
         res["refused"],
         len(awaiting),
     )
