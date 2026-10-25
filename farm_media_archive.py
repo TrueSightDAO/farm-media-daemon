@@ -389,6 +389,59 @@ def zip_is_complete(zip_path: str, extensions: tuple) -> bool:
     return all(bn in done for bn in media)
 
 
+def zip_still_entries(zip_path: str) -> list:
+    """Basenames of STILL PHOTO entries in a zip (junk skipped); [] if unreadable.
+
+    Stills are never archived to S3 (MEDIA_ARCHIVE_PIPELINE.md: "No S3 for still
+    photos" -- they belong in the GitHub repo farm-media-raw). They still need to
+    be *seen* so a stills-only drop can be recognised and promoted.
+    """
+    try:
+        with zipfile.ZipFile(zip_path) as zf:
+            infos = zf.infolist()
+    except (zipfile.BadZipFile, OSError):
+        return []
+    out = []
+    for info in infos:
+        bn = os.path.basename(info.filename)
+        if _is_junk_entry(info.filename):
+            continue
+        if bn.lower().endswith(_PHOTO_EXTS):
+            out.append(bn)
+    return out
+
+
+def zip_is_stills_only(zip_path: str, extensions: tuple) -> bool:
+    """True for a zip holding still photos but NO S3-archivable media entries.
+
+    Such a drop can NEVER satisfy ``zip_is_complete`` (which is keyed on the
+    archivable extensions), so without this branch it sits in the zip_dir
+    forever. That is the 2026-10-03 dead drop of ``ilheus_warehouse_2.zip``
+    (2 HEIC stills, 0 videos): a real drop, silently never promoted.
+
+    Stills are never archived, so "done" for a stills-only zip means
+    "recorded as skipped", not "uploaded".
+    """
+    if zip_media_entries(zip_path, extensions):
+        return False  # there IS archivable media; the normal path owns this zip
+    return bool(zip_still_entries(zip_path))
+
+
+def record_stills_only(zip_path: str) -> None:
+    """Stamp a stills-only zip's sidecar so provenance survives promotion."""
+    state, st_path = load_zip_state(zip_path)
+    state["stills"] = zip_still_entries(zip_path)
+    state["skipped"] = "stills_only"
+    state["skip_reason"] = (
+        "No S3-archivable video entries. Still photos are never sent to S3 "
+        "(MEDIA_ARCHIVE_PIPELINE.md); they belong in the GitHub repo "
+        "farm-media-raw. Recorded here so the zip is promoted instead of "
+        "dead-dropping in the zip_dir."
+    )
+    state["recorded_at"] = dt.datetime.now(dt.timezone.utc).isoformat()
+    write_sidecar(st_path, state)
+
+
 def promote_zip(zip_path: str, processed_dir: str) -> str:
     """Atomically move a FINISHED zip AND its sidecar into ``processed_dir``.
 
@@ -488,7 +541,19 @@ def process_zip_dir(
             LOG.error("%s zip %s failed: %s", zid, zip_path, exc)
             time.sleep(BACKOFF_ERROR_S)
             continue
-        if zip_is_complete(zip_path, exts):
+        done = zip_is_complete(zip_path, exts)
+        if not done and zip_is_stills_only(zip_path, exts):
+            # Stills-only drop: nothing will ever archive, so zip_is_complete()
+            # stays False forever and the zip would dead-drop right here.
+            # Record it, then treat it as done so it promotes to processed_dir.
+            record_stills_only(zip_path)
+            done = True
+            LOG.info(
+                "%s: %s holds stills only (never sent to S3) -> recorded + promoting",
+                zid,
+                name,
+            )
+        if done:
             try:
                 dst = promote_zip(zip_path, processed_dir)
                 LOG.info("%s: COMPLETE -> moved %s to %s", zid, name, dst)
