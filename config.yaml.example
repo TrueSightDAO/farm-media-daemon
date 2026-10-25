@@ -97,6 +97,14 @@ defaults:
 captions:
   model: base            # faster-whisper model: base | small | medium
   language: pt           # source audio language (task="translate" to English)
+  # LLM vision stage (`visual` subcommand): Gemini reads ~3 frames sampled
+  # across each clip and records what is VISIBLE in the sidecar as
+  # visual_description + visual_framing/setting/subjects/product_in_frame.
+  # Idempotent on visual_description, so re-runs never re-bill.
+  # Requires GEMINI_API_KEY. Do NOT set this to gemini-2.5-flash: it is 404
+  # for new project keys.
+  vision_model: gemini-3-flash-preview
+  visual_frame_fracs: [0.15, 0.50, 0.85]   # frames at 15% / 50% / 85% of duration
 
 # Photo enrichment (farm_media_photo_enrich.py) -- OCR + vision tags for still
 # photos (HEIC/JPG/PNG). Runs at archive time so every NEW photo's manifest

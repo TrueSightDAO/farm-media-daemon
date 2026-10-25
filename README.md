@@ -38,6 +38,7 @@ It **never touches GitHub** — manifests are committed deliberately by a Sophia
 - `farm_media_archive.py --once` — run one archive pass (S3 worker) for testing.
 - `farm-media-captions enrich` — transcribe+translate inbox videos to English (writes `.vtt` + sets description in sidecar; reverse-geocodes GPS into the description when a Maps key is present).
 - `farm-media-captions backfill` — enrich, then attach caption tracks + EN descriptions to already-uploaded videos (429-aware).
+- `farm-media-captions visual [--limit N] [--dry-run]` — LLM vision captions for archived clips: Gemini Flash samples ~3 frames straight from the S3 URL (no download) and writes `visual_description` + `visual_framing` / `visual_setting` / `visual_subjects` / `product_in_frame` into `<zip>.archive.json`, appending the visual gist to `description`. Idempotent on `visual_description` (a described clip is never re-billed); failures bump `visual_attempts` and stop after 3. Requires `GEMINI_API_KEY`.
 - `farm-media-daemon` — run the daemon (systemd unit provided).
 
 ## Systemd
