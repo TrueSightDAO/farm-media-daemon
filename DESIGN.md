@@ -124,6 +124,7 @@ while True:
 - `farm-media-manifest commit <farm_id>` — aggregate sidecars → `farm_media_manifests/<farm>.json` and open a PR (repo TrueSightDAO/farm_media_manifests).
 - `farm_media_archive.py --once` — run one S3-archive pass (testing).
 - `farm_media_captions.py enrich` — transcribe+translate inbox videos to English; writes `<file>.mp4.en.vtt` WebVTT + sets sidecar `transcript_en` and makes the EN translation the `description` (original preserved as `description_original`). When the sidecar has GPS, also reverse-geocodes it (Google Geocoding API, `farm_media_geo.py`) and weaves a "📍 Place, Region" line into the description, storing `place_name` / `place_address` / `place_id`. Runs pre-upload so new videos ship with captions.
+- `farm_media_captions.py visual` — LLM vision captioning for ARCHIVED clips (zip-level `<zip>.archive.json` `entries`, frames pulled from `raw_url` via ffmpeg). Writes `visual_description`, `visual_framing`, `visual_setting`, `visual_subjects`, `product_in_frame`, `visual_camera`; appends the gist to `description`. Idempotent on `visual_description`; `visual_attempts` caps retries at 3. Model constant `gemini-3-flash-preview` with `thinkingBudget: 0` (3.x thinking models silently truncate otherwise; 2.5-flash is 404 for new keys).
 - `farm_media_captions.py backfill` — enrich, then for every already-uploaded video (has `yt_id`) attach the caption track (`captions().insert`) and push the EN description (`videos().update`, snippet-preserving). 429-aware with backoff, resume-safe.
 - `farm-media-daemon` — the daemon itself.
 
