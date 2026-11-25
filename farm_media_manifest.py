@@ -68,12 +68,28 @@ def _parse_gps(gps):
     return None, None, str(gps) if gps else None
 
 
+def _transcription_status(side, ext):
+    """Resolve a manifest transcription status from sidecar fields.
+
+    The site's search box matches `transcription` (farm-media-site app.js:147/384),
+    but sidecars store the text under `transcript_en`. Mapping it here keeps
+    spoken-word search working; without it every manifest silently dropped the
+    transcript and no farm's speech was findable.
+    """
+    if side.get("transcription") or side.get("transcript_en"):
+        return "done"
+    if (ext or "").upper() in PHOTO_EXTS:
+        return "not_applicable"
+    return "missing"
+
+
 def _ext(name):
     return os.path.splitext(name)[1].lstrip(".").upper() or "UNKNOWN"
 
 
 GALLERY_SUBDIR = "galleries"
 MEDIA_EXTS = {".mov", ".mp4", ".m4v", ".heic", ".heif", ".jpg", ".jpeg", ".png"}
+PHOTO_EXTS = {".heic", ".heif", ".png", ".jpg", ".jpeg", ".tif", ".tiff", ".webp"}
 
 
 def build_manifest(farm_id, inbox_dir, today=None, with_paths=False, locations=_AUTO):
@@ -147,6 +163,9 @@ def build_manifest(farm_id, inbox_dir, today=None, with_paths=False, locations=_
             "yt_id": side.get("yt_id"),
             "uploaded_at": side.get("uploaded_at"),
             "source_zip": side.get("source_zip"),
+            "transcription": side.get("transcription") or side.get("transcript_en"),
+            "transcription_status": _transcription_status(side, ext),
+            "vtt": side.get("vtt"),
             "error": side.get("error"),
         }
         if with_paths:
