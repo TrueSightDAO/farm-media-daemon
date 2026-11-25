@@ -23,6 +23,16 @@ file is the transcoded ``IMG_1.mp4``; size-dedup archive entries carry no
 sha256, only ``exists``/``raw_url``). A key that maps to more than one zip is
 ambiguous and is skipped, never guessed.
 
+``farm_id`` disagrees between the two sides for some farms: the inbox directory
+is named after the delivery (``raimundo-geniza-para``) while the archive sidecar
+records the canonical farm (``raimundo-geniza``). ``FARM_ALIASES`` reconciles
+those explicitly; anything not listed is treated as a mismatch and left
+unmatched -- mis-filing is irreversible, so fail-closed.
+
+Archive sidecars also accumulate in several roots, not just ``/media/processed``
+(legacy strays in ``/media/upload_zips`` and ``$HOME``), so the index reads all
+of ``DEFAULT_PROCESSED_DIRS``.
+
 Idempotent: an existing ``source_zip`` is never overwritten. Dry-run unless
 ``--apply``.
 
@@ -40,8 +50,33 @@ import json
 import os
 import sys
 
-DEFAULT_PROCESSED = "/media/processed"
+# Archive sidecars live in several places on the box: the canonical
+# /media/processed plus legacy strays left behind in /media/upload_zips and $HOME.
+DEFAULT_PROCESSED_DIRS = ("/media/processed", "/media/upload_zips", "/home/ubuntu")
 DEFAULT_INBOX = "/media/media_archive_inbox"
+
+# inbox folder name -> archive farm_id, ONLY where both name the SAME farm.
+#
+# Kept explicit and deliberately tiny. A suffix-strip heuristic ("-para",
+# "-bahia") resolves just 1 of the 10 mismatched inbox folders and silently
+# mis-files the rest -- and a wrong farm_id is an irreversible S3 mis-file.
+FARM_ALIASES: dict[str, str] = {
+    "raimundo-geniza-para": "raimundo-geniza",
+}
+
+# Mismatched inbox folders that MUST NOT be aliased, with the reason, so a
+# future session does not "helpfully" add them (thread 30550 §0).
+UNALIASED_BY_DESIGN: dict[str, str] = {
+    "la-do-sitio": "a DISTINCT farm from paulo-la-do-sitio; aliasing would mis-file",
+    "rancho-maranta-para": "two archive farms (rancho-maranta-plot-1 / -plot-2); not separable",
+    "crf-anapu-para": "no archive sidecar exists yet",
+    "cristo-rei-pacaje-para": "no archive sidecar exists yet",
+    "facility-coopercabruca": "no archive sidecar exists yet",
+    "jedielcio": "no archive sidecar exists yet",
+    "sitio-catarinense-para": "no archive sidecar exists yet",
+    "sitio-torres-pacaja-para": "no archive sidecar exists yet",
+    "tutorial-media": "no archive sidecar exists yet",
+}
 
 
 def _stem(name: str) -> str:
@@ -56,8 +91,23 @@ def _farm_from_raw_url(url: str) -> str | None:
     return parts[0] if len(parts) >= 2 else None
 
 
-def build_zip_index(processed_dir: str = DEFAULT_PROCESSED) -> dict:
-    """(farm_id, sha256) -> zip  and  (farm_id, stem) -> zip.
+def resolve_farm_ids(inbox_farm: str) -> list[str]:
+    """Archive ``farm_id``s to try for an inbox folder, alias first."""
+    alias = FARM_ALIASES.get(inbox_farm)
+    return [alias, inbox_farm] if alias else [inbox_farm]
+
+
+def _archive_sidecars(processed_dirs) -> list[str]:
+    if isinstance(processed_dirs, str):
+        processed_dirs = (processed_dirs,)
+    paths: list[str] = []
+    for d in processed_dirs:
+        paths.extend(sorted(glob.glob(os.path.join(d, "*.archive.json"))))
+    return paths
+
+
+def build_zip_index(processed_dirs=DEFAULT_PROCESSED_DIRS) -> dict:
+    """(farm_id, sha256) -> zip  and  (farm_id, stem) -> zip, across all roots.
 
     Returns (by_sha, by_stem, ambiguous_keys, n_zips).
     """
@@ -66,7 +116,7 @@ def build_zip_index(processed_dir: str = DEFAULT_PROCESSED) -> dict:
     ambiguous: set[tuple[str, str]] = set()
     n_zips = 0
 
-    for path in sorted(glob.glob(os.path.join(processed_dir, "*.archive.json"))):
+    for path in _archive_sidecars(processed_dirs):
         try:
             with open(path, encoding="utf-8") as fh:
                 doc = json.load(fh)
@@ -104,15 +154,16 @@ def build_zip_index(processed_dir: str = DEFAULT_PROCESSED) -> dict:
 
 def backfill(
     inbox_dir: str = DEFAULT_INBOX,
-    processed_dir: str = DEFAULT_PROCESSED,
+    processed_dirs=DEFAULT_PROCESSED_DIRS,
     apply: bool = False,
     out=sys.stdout,
 ) -> dict:
-    by_sha, by_stem, ambiguous, n_zips = build_zip_index(processed_dir)
+    by_sha, by_stem, ambiguous, n_zips = build_zip_index(processed_dirs)
     stats = {
         "zips": n_zips,
         "sidecars": 0,
         "stamped": 0,
+        "alias_resolved": 0,
         "already": 0,
         "unmatched": 0,
         "ambiguous_skipped": 0,
@@ -139,19 +190,40 @@ def backfill(
                 continue
             sha = sc.get("sha256")
             base = sc.get("file") or fn[:-5]
+            candidates = resolve_farm_ids(farm_id)
             zip_name = None
-            if sha and (farm_id, sha) in by_sha:
-                zip_name = by_sha[(farm_id, sha)]
-            else:
-                ks = (farm_id, _stem(base))
-                if ks in ambiguous:
+            matched_farm = farm_id
+
+            if sha:
+                for f in candidates:
+                    z = by_sha.get((f, sha))
+                    if z:
+                        zip_name, matched_farm = z, f
+                        break
+
+            if not zip_name:
+                hits: dict[str, str] = {}
+                saw_ambiguous = False
+                stem = _stem(base)
+                for f in candidates:
+                    k = (f, stem)
+                    if k in ambiguous:
+                        saw_ambiguous = True
+                    z = by_stem.get(k)
+                    if z:
+                        hits[z] = f
+                if saw_ambiguous or len(hits) > 1:
                     stats["ambiguous_skipped"] += 1
                     print(f"  ambiguous, skipped: {farm_id}/{base}", file=out)
                     continue
-                zip_name = by_stem.get(ks)
+                if hits:
+                    zip_name, matched_farm = next(iter(hits.items()))
+
             if not zip_name:
                 stats["unmatched"] += 1
                 continue
+            if matched_farm != farm_id:
+                stats["alias_resolved"] += 1
             sc["source_zip"] = zip_name
             if apply:
                 tmp = sp + ".tmp"
@@ -171,6 +243,7 @@ def backfill(
         f"{'' if apply else '  [dry-run]'}",
         file=out,
     )
+    print(f"    of which via farm alias: {stats['alias_resolved']}", file=out)
     print(f"  unmatched (no origin)   : {stats['unmatched']}", file=out)
     print(f"  ambiguous, skipped      : {stats['ambiguous_skipped']}", file=out)
     print(f"  read errors             : {stats['errors']}", file=out)
@@ -182,12 +255,21 @@ def main(argv=None) -> int:
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
     ap.add_argument("--inbox", default=DEFAULT_INBOX)
-    ap.add_argument("--processed", default=DEFAULT_PROCESSED)
+    ap.add_argument(
+        "--processed",
+        action="append",
+        default=None,
+        help=(
+            "archive-sidecar root; repeatable. "
+            f"default: {' '.join(DEFAULT_PROCESSED_DIRS)}"
+        ),
+    )
     ap.add_argument(
         "--apply", action="store_true", help="write the sidecars (default: report only)"
     )
     a = ap.parse_args(argv)
-    backfill(a.inbox, a.processed, apply=a.apply)
+    dirs = tuple(a.processed) if a.processed else DEFAULT_PROCESSED_DIRS
+    backfill(a.inbox, dirs, apply=a.apply)
     return 0
 
 
