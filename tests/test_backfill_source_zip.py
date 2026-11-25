@@ -87,3 +87,71 @@ def test_dry_run_writes_nothing(tmp_path):
     with open(os.path.join(inbox, "farm-media", "faz", "IMG_1.mp4.json")) as fh:
         got = json.load(fh)
     assert "source_zip" not in got
+
+
+def test_alias_maps_inbox_farm_to_archive_farm(tmp_path):
+    """The inbox dir is "<delivery>-para"; the archive sidecar says the canonical farm."""
+    proc, inbox = str(tmp_path / "p"), str(tmp_path / "i")
+    _archive(
+        proc,
+        "raimundo.zip",
+        {"IMG_7.MOV": {"farm_id": "raimundo-geniza", "sha256": "bb"}},
+    )
+    _inbox(
+        proc,
+        inbox,
+        "raimundo-geniza-para",
+        "IMG_7.mp4.json",
+        {"file": "IMG_7.mp4", "sha256": "bb"},
+    )
+    st = B.backfill(inbox, proc, apply=True)
+    assert st["stamped"] == 1
+    assert st["alias_resolved"] == 1
+    with open(
+        os.path.join(inbox, "farm-media", "raimundo-geniza-para", "IMG_7.mp4.json")
+    ) as fh:
+        assert json.load(fh)["source_zip"] == "raimundo.zip"
+
+
+def test_la_do_sitio_is_never_aliased(tmp_path):
+    """la-do-sitio and paulo-la-do-sitio are DISTINCT farms -- must not conflate."""
+    assert "la-do-sitio" not in B.FARM_ALIASES
+    assert B.resolve_farm_ids("la-do-sitio") == ["la-do-sitio"]
+    assert "la-do-sitio" in B.UNALIASED_BY_DESIGN
+
+    proc, inbox = str(tmp_path / "p"), str(tmp_path / "i")
+    # archive data belongs to the OTHER farm; a naive alias would mis-file onto it
+    _archive(
+        proc,
+        "paulo.zip",
+        {"IMG_5.MOV": {"farm_id": "paulo-la-do-sitio", "sha256": "cc"}},
+    )
+    _inbox(
+        proc,
+        inbox,
+        "la-do-sitio",
+        "IMG_5.mp4.json",
+        {"file": "IMG_5.mp4", "sha256": "cc"},
+    )
+    st = B.backfill(inbox, proc, apply=True)
+    assert st["stamped"] == 0 and st["unmatched"] == 1
+    with open(os.path.join(inbox, "farm-media", "la-do-sitio", "IMG_5.mp4.json")) as fh:
+        assert "source_zip" not in json.load(fh)
+
+
+def test_index_reads_multiple_roots(tmp_path):
+    """Legacy strays outside /media/processed still resolve."""
+    root1, root2 = str(tmp_path / "p1"), str(tmp_path / "p2")
+    inbox = str(tmp_path / "i")
+    _archive(root2, "old.zip", {"IMG_3.MOV": {"farm_id": "faz", "sha256": "dd"}})
+    _inbox(
+        proc=None,
+        inbox=inbox,
+        farm="faz",
+        name="IMG_3.mp4.json",
+        side={"file": "IMG_3.mp4", "sha256": "dd"},
+    )
+    st = B.backfill(inbox, (root1, root2), apply=True)
+    assert st["stamped"] == 1
+    with open(os.path.join(inbox, "farm-media", "faz", "IMG_3.mp4.json")) as fh:
+        assert json.load(fh)["source_zip"] == "old.zip"
