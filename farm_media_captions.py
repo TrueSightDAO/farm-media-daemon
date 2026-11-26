@@ -138,9 +138,37 @@ VISION_MODEL = os.environ.get("FARM_MEDIA_GEMINI_MODEL", "gemini-3-flash-preview
 VISUAL_FRAME_FRACS = (0.15, 0.50, 0.85)
 VISUAL_MAX_ATTEMPTS = 3
 VIDEO_EXTS = (".mp4", ".mov", ".m4v")
+
+# Dense sampling for the frame index (2026-11-26): the three fracs above give a
+# gist but are far too sparse to answer "which frames have cacao in frame" --
+# a 3s pan of a drying bed and a 30s talking-head clip both collapse to one
+# boolean. We now sample enough frames to cover the clip and keep a per-frame
+# verdict bound to its real timestamp.
+FRAME_INDEX_FPS = 1.0
+FRAME_INDEX_MAX_FRAMES = 12
+FRAME_INDEX_MIN_GAP_S = 0.5
+
+# Observable stage -- what a camera can actually see. Deliberately NOT a
+# commercial grade: bulk vs gourmet is assigned at fermentation/drying from bean
+# size, fermentation index, defect count and moisture (a hand cut test) and is
+# not visible in footage. Grade belongs to the LOT in the ledger
+# (Agroverse Cacao Category Pricing); media points at the lot, never restates it.
+CACAO_STAGES = (
+    "whole_pod",
+    "wet_beans",
+    "fermenting",
+    "drying",
+    "dried_beans",
+    "roasted",
+    "nibs",
+    "liquor",
+    "bar",
+    "powder",
+)
 VISUAL_PROMPT = (
-    "These are {n} frames sampled in order (early/middle/late) from ONE short "
-    "handheld video. Describe only what is visibly true in the frames. Do not "
+    "These are {n} frames sampled in order from ONE short handheld video. "
+    "Frames are numbered from 0 in the order given. Describe only what is "
+    "visibly true in the frames. Do not "
     "speculate about intent, emotion, off-screen activity, or names.\n\n"
     "Return JSON with:\n"
     '- "description": one or two plain sentences giving the visual gist.\n'
@@ -150,6 +178,14 @@ VISUAL_PROMPT = (
     '- "product_in_frame": true only if cacao product (beans, nibs, bars, '
     "pouches, bags or boxes of product) is identifiable; false if only "
     "people, environment or generic packaging.\n"
+    '- "frame_index": one entry per sampled frame, in the order given, each '
+    'with "index" (0-based), "cacao_visible" (true only if cacao beans or a '
+    'cacao product are actually visible in THAT frame) and "cacao_stage" '
+    "(the observable stage in that frame).\n"
+    '- "cacao_stage": the stage for the clip as a whole -- observable only: '
+    "whole_pod|wet_beans|fermenting|drying|dried_beans|roasted|nibs|liquor|bar"
+    '|powder, else "none". Never a grade (bulk/gourmet): that is not visible '
+    "in footage and must not be guessed.\n"
     '- "camera": "handheld" | "static" | "unclear"'
 )
 VISUAL_SCHEMA = {
@@ -161,7 +197,24 @@ VISUAL_SCHEMA = {
         "subjects": {"type": "ARRAY", "items": {"type": "STRING"}},
         "product_in_frame": {"type": "BOOLEAN"},
         "camera": {"type": "STRING"},
+        "cacao_stage": {"type": "STRING"},
+        "frame_index": {
+            "type": "ARRAY",
+            "items": {
+                "type": "OBJECT",
+                "properties": {
+                    "index": {"type": "INTEGER"},
+                    "cacao_visible": {"type": "BOOLEAN"},
+                    "cacao_stage": {"type": "STRING"},
+                },
+                "required": ["index", "cacao_visible", "cacao_stage"],
+            },
+        },
     },
+    # cacao_stage / frame_index are required, not optional: while they sat in
+    # `properties` only, the model was free to omit them and every sidecar kept
+    # an empty value. If a clip has no cacao the model must say "none", not
+    # nothing.
     "required": [
         "description",
         "framing",
@@ -169,6 +222,8 @@ VISUAL_SCHEMA = {
         "subjects",
         "product_in_frame",
         "camera",
+        "cacao_stage",
+        "frame_index",
     ],
 }
 
@@ -182,6 +237,41 @@ def visual_frame_times(duration_s, fracs=VISUAL_FRAME_FRACS) -> list:
     if dur <= 0:
         return []
     return [round(dur * f, 3) for f in fracs]
+
+
+def visual_frame_times_dense(
+    duration_s,
+    fps: float = FRAME_INDEX_FPS,
+    max_frames: int = FRAME_INDEX_MAX_FRAMES,
+    min_gap_s: float = FRAME_INDEX_MIN_GAP_S,
+) -> list:
+    """Evenly spaced timestamps covering the WHOLE clip, capped at `max_frames`.
+
+    The cap matters more than the rate: these frames go in ONE Gemini call per
+    clip, so uncapped 1 fps over a 6-minute clip would be 360 images. Cost is
+    then flat per clip regardless of length, which is what a frame index needs.
+
+    Short clip -> walk at ~`fps` (up to the cap).
+    Long clip  -> spread `max_frames` evenly across the full duration. Without
+    that branch a 6-minute clip gets 12 frames from its first 12 seconds only,
+    which is coverage of nothing.
+    """
+    try:
+        dur = float(duration_s or 0)
+    except (TypeError, ValueError):
+        return []
+    if dur <= 0:
+        return []
+    step = max(1.0 / fps if fps > 0 else 1.0, min_gap_s)
+    if dur <= max_frames * step:
+        times = []
+        t = step / 2.0  # off t=0: frame 0 is often black or a flash frame
+        while t < dur and len(times) < max_frames:
+            times.append(round(t, 3))
+            t += step
+        return times or [round(dur / 2.0, 3)]
+    span = dur / max_frames
+    return [round(span * (i + 0.5), 3) for i in range(max_frames)]
 
 
 def _ffmpeg_frame(url: str, ts: float, out: str, timeout: int = 180) -> bool:
@@ -219,13 +309,27 @@ def _ffmpeg_frame(url: str, ts: float, out: str, timeout: int = 180) -> bool:
 
 
 def describe_clip(
-    raw_url: str, duration_s, model: str = "", fracs=VISUAL_FRAME_FRACS
+    raw_url: str,
+    duration_s,
+    model: str = "",
+    fracs=VISUAL_FRAME_FRACS,
+    dense: bool = False,
 ) -> dict:
-    """Sample frames and ask Gemini what is visible. {"error": ...} on failure."""
+    """Sample frames and ask Gemini what is visible. {"error": ...} on failure.
+
+    `dense=True` samples the whole clip (visual_frame_times_dense) instead of the
+    three legacy fracs, and returns a per-frame verdict with its timestamp --
+    that is the frame index. Default stays on the legacy fracs so existing
+    callers and tests are unaffected.
+    """
     key = os.environ.get("GEMINI_API_KEY")
     if not key:
         return {"error": "GEMINI_API_KEY not set"}
-    times = visual_frame_times(duration_s, fracs)
+    times = (
+        visual_frame_times_dense(duration_s)
+        if dense
+        else visual_frame_times(duration_s, fracs)
+    )
     if not times:
         return {"error": f"no usable duration ({duration_s!r})"}
     use_model = model or VISION_MODEL
@@ -253,7 +357,9 @@ def describe_clip(
             ],
             "generationConfig": {
                 "temperature": 0.2,
-                "maxOutputTokens": 600,
+                # Up to 12 frames x 3 fields of JSON when dense; 600
+                # truncates the response silently (finishReason stays STOP).
+                "maxOutputTokens": 1200 if dense else 600,
                 # See MODEL NOTES above: without this the caption truncates.
                 "thinkingConfig": {"thinkingBudget": 0},
                 "responseMimeType": "application/json",
@@ -279,6 +385,17 @@ def describe_clip(
             return {"error": f"non-JSON response: {text[:120]}"}
         out["model"] = use_model
         out["frames"] = len(parts)
+        # Bind each verdict to the real timestamp it was sampled at. A frame
+        # verdict without its time is unqueryable -- "beans at index 4" says
+        # nothing, "beans at 4.5s" is a citation.
+        out["frame_times"] = list(times)
+        fi = out.get("frame_index")
+        if isinstance(fi, list):
+            for row in fi:
+                if isinstance(row, dict):
+                    i = row.get("index")
+                    if isinstance(i, int) and 0 <= i < len(times):
+                        row["t_s"] = times[i]
         return out
     except urllib.error.HTTPError as exc:
         return {"error": f"HTTP {exc.code}: {(exc.read() or b'')[:160]}"}
@@ -288,7 +405,12 @@ def describe_clip(
         shutil.rmtree(tmp, ignore_errors=True)
 
 
-def visual_one(entry: dict, model: str = "", fracs=VISUAL_FRAME_FRACS) -> bool:
+def visual_one(
+    entry: dict,
+    model: str = "",
+    fracs=VISUAL_FRAME_FRACS,
+    dense: bool = False,
+) -> bool:
     """Describe ONE sidecar entry in place. True when the dict changed.
 
     Idempotent: an entry that already has `visual_description` is left alone, so
@@ -309,7 +431,7 @@ def visual_one(entry: dict, model: str = "", fracs=VISUAL_FRAME_FRACS) -> bool:
     if not url:
         entry["visual_error"] = "no raw_url/preview_url"
         return True
-    out = describe_clip(url, entry.get("duration_s"), model, fracs)
+    out = describe_clip(url, entry.get("duration_s"), model, fracs, dense=dense)
     entry["visual_attempts"] = int(entry.get("visual_attempts") or 0) + 1
     if out.get("error"):
         entry["visual_error"] = out["error"]
@@ -327,6 +449,26 @@ def visual_one(entry: dict, model: str = "", fracs=VISUAL_FRAME_FRACS) -> bool:
     entry["visual_subjects"] = out.get("subjects") or []
     entry["product_in_frame"] = out.get("product_in_frame")
     entry["visual_camera"] = out.get("camera")
+    # Frame index (2026-11-26): the prompt has asked for cacao_stage/frame_index
+    # since the dense sampler landed, but visual_one never wrote them back, so
+    # every sidecar reported an empty stage. Grade is deliberately absent: bulk
+    # vs gourmet is a LOT attribute (Agroverse Cacao Category Pricing), not
+    # something footage can show -- media points at the lot, never restates it.
+    stage = (out.get("cacao_stage") or "").strip()
+    entry["cacao_stage"] = stage if stage in CACAO_STAGES else "none"
+    fi = out.get("frame_index")
+    if isinstance(fi, list):
+        rows = [r for r in fi if isinstance(r, dict)]
+        entry["frame_index"] = rows
+        # Queryable form: the timestamps where cacao was actually visible.
+        entry["cacao_visible_frames"] = [
+            r.get("t_s")
+            for r in rows
+            if r.get("cacao_visible") and r.get("t_s") is not None
+        ]
+    ft = out.get("frame_times")
+    if isinstance(ft, list):
+        entry["frame_times"] = ft
     entry["visual_model"] = out.get("model")
     entry["visual_recorded_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     entry.pop("visual_error", None)
@@ -367,6 +509,7 @@ def run_visual(
     limit: int = 0,
     dry_run: bool = False,
     archive: str = "",
+    dense: bool = False,
 ) -> int:
     """LLM-caption archived clips still missing `visual_description`.
 
@@ -405,7 +548,7 @@ def run_visual(
                 done += 1
                 continue
             LOG.info("describing %s (%ss)", name, entry.get("duration_s"))
-            if visual_one(entry, model, fracs):
+            if visual_one(entry, model, fracs, dense=dense):
                 changed = True
                 if (entry.get("visual_description") or "").strip():
                     done += 1
@@ -417,8 +560,6 @@ def run_visual(
             LOG.info("wrote %s", path)
     LOG.info("visual done: %d described, %d skipped, %d failed", done, skipped, failed)
     return done
-
-
 
 
 # --------------------------------------------------------------------------- whisper
@@ -697,6 +838,11 @@ def main() -> int:
     )
     p_vis.add_argument("--limit", type=int, default=0, help="max clips (0 = all)")
     p_vis.add_argument(
+        "--dense",
+        action="store_true",
+        help="sample frames across the whole clip and keep a per-frame cacao index",
+    )
+    p_vis.add_argument(
         "--dry-run", action="store_true", help="list what would be described"
     )
     p_vis.add_argument(
@@ -730,6 +876,7 @@ def main() -> int:
             args.limit,
             args.dry_run,
             getattr(args, "archive", "") or "",
+            dense=getattr(args, "dense", False),
         )
     elif args.action == "enrich":
         run_enrich(cfg, model, lang)
